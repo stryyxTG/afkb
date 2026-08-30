@@ -87,8 +87,9 @@ from tglol.telegram_service import (
 router = Router()
 logger = logging.getLogger(__name__)
 
-CODE_WATCH_SECONDS = 2 * 60
+CODE_WATCH_SECONDS = 10 * 60
 CODE_WATCH_POLL_SECONDS = 10
+MAX_TRIGGER_GIVEOUT_COUNT = 15
 CODE_RETRY_WATCH_SECONDS = 2 * 60
 CODE_WATCH_MAX_CONCURRENT_POLLS = 5
 _active_retry_code_tasks: set[tuple[int, int, int]] = set()
@@ -152,7 +153,7 @@ def _trigger_menu_text(config: Config) -> str:
         "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0432\u044b\u0434\u0430\u0447\u0438\n"
         f"\u0427\u0430\u0442: <code>{escape(chat)}</code>\n"
         f"\u0421\u043b\u043e\u0432\u043e: <code>{escape(word)}</code>\n\n"
-        "\u041f\u043e \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u0443 \u0431\u043e\u0442 \u0432\u044b\u0434\u0430\u0435\u0442 \u0440\u043e\u0432\u043d\u043e 1 \u043d\u043e\u043c\u0435\u0440."
+        f"\u041f\u043e \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u0443 \u0431\u043e\u0442 \u0432\u044b\u0434\u0430\u0451\u0442 1-15 \u043d\u043e\u043c\u0435\u0440\u043e\u0432: <code>{escape(word)} 5</code>."
     )
 
 
@@ -197,6 +198,16 @@ def _matches_trigger_word(text: str, trigger_word: str) -> bool:
         return False
     return bool(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text or "", flags=re.IGNORECASE))
 
+
+
+def _trigger_request_count(text: str, trigger_word: str) -> int:
+    word = (trigger_word or "тг").strip()
+    if not word:
+        return 1
+    match = re.search(rf"(?<!\w){re.escape(word)}(?!\w)(?:\s+(\d{{1,3}}))?", text or "", flags=re.IGNORECASE)
+    if not match or not match.group(1):
+        return 1
+    return max(1, min(MAX_TRIGGER_GIVEOUT_COUNT, int(match.group(1))))
 
 def _pages(total: int) -> int:
     return max(1, ceil(total / ACCOUNTS_PER_PAGE))
@@ -416,7 +427,7 @@ def _code_receiver_menu_text(config: Config) -> str:
         f"\u0427\u0430\u0442: <code>{escape(chat)}</code>\n"
         f"\u0421\u043b\u043e\u0432\u043e: <code>{escape(word)}</code>\n"
         f"\u041f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a: {receiver_text}\n\n"
-        "\u041f\u043e \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u0443 \u0432\u044b\u0434\u0430\u0451\u0442\u0441\u044f \u0440\u043e\u0432\u043d\u043e 1 \u043d\u043e\u043c\u0435\u0440. \u0411\u0435\u0437 \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430 \u0432\u044b\u0434\u0430\u0447\u0430 \u043d\u0435 \u0441\u0442\u0430\u0440\u0442\u0443\u0435\u0442."
+        f"\u041f\u043e \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u0443 \u0432\u044b\u0434\u0430\u0451\u0442\u0441\u044f 1-15 \u043d\u043e\u043c\u0435\u0440\u043e\u0432: <code>{escape(word)} 5</code>. \u041a\u043e\u0434\u044b \u0438\u0449\u0443\u0442\u0441\u044f 10 \u043c\u0438\u043d\u0443\u0442."
     )
 
 
@@ -796,7 +807,7 @@ async def _notify_owners(bot: Bot, config: Config, *, reason: str, account_phone
 
 
 async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None:
-    requested = 1
+    requested = _trigger_request_count(getattr(message, "text", "") or "", config.trigger_word)
     requested_count = requested
 
     try:
@@ -1785,11 +1796,12 @@ async def add_zip_file(message: Message, bot: Bot, state: FSMContext, config: Co
 
 
 class _GiveoutMessageAdapter:
-    def __init__(self, config: Config, *, chat_id: int, requester_user_id: int, message_id: int):
+    def __init__(self, config: Config, *, chat_id: int, requester_user_id: int, message_id: int, text: str = ""):
         self._config = config
         self.chat = type("Chat", (), {"id": chat_id})()
         self.from_user = type("User", (), {"id": requester_user_id})()
         self.message_id = message_id
+        self.text = text
 
     async def answer(self, text: str, **kwargs) -> None:
         await _send_via_code_receiver(
@@ -1895,6 +1907,7 @@ async def handle_code_receiver_trigger(
         chat_id=chat_id,
         requester_user_id=requester_user_id,
         message_id=message_id,
+        text=text,
     )
     await _give_out_accounts(adapter, bot, config)
 

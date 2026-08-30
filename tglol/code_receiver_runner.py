@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 
 from aiogram import Bot
@@ -23,7 +24,6 @@ def _receiver_key(receiver) -> tuple | None:
     return (
         receiver.session_path,
         receiver.json_effective_path or receiver.json_original_path,
-        receiver.updated_at,
     )
 
 
@@ -41,6 +41,16 @@ def _receiver_connection_params(receiver, config: Config):
         runtime["proxy"] = config.telegram_proxy
         runtime["proxy_source"] = "global"
     return api_id, api_hash, runtime
+
+
+def _listener_session_path(session_path: Path) -> Path:
+    target = session_path.with_name(f"{session_path.stem}_listener{session_path.suffix}")
+    try:
+        if not target.exists() or target.stat().st_mtime < session_path.stat().st_mtime:
+            shutil.copy2(session_path, target)
+    except OSError:
+        return session_path
+    return target
 
 
 async def run_code_receiver_listener(bot: Bot, config: Config) -> None:
@@ -70,7 +80,7 @@ async def run_code_receiver_listener(bot: Bot, config: Config) -> None:
                     await asyncio.sleep(10)
                     continue
                 api_id, api_hash, runtime = _receiver_connection_params(receiver, config)
-                client = client_for(session_path, api_id, api_hash, runtime, receive_updates=True)
+                client = client_for(_listener_session_path(session_path), api_id, api_hash, runtime, receive_updates=True)
 
                 @client.on(events.NewMessage(chats=config.trigger_chat_id))
                 async def _on_trigger(event):

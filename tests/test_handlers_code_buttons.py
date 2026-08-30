@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tglol.handlers import _send_code_delivery, _terminal_code_poll_status
+from tglol.handlers import _send_code_delivery, _terminal_code_poll_status, _trigger_request_count
 
 
 class FakeBot:
@@ -77,6 +77,16 @@ class CodeButtonTests(unittest.IsolatedAsyncioTestCase):
     def test_unauthorized_poll_error_is_terminal(self):
         self.assertEqual(_terminal_code_poll_status(RuntimeError("session is not authorized")), "unauthorized")
         self.assertIsNone(_terminal_code_poll_status(TimeoutError("temporary timeout")))
+
+
+    def test_trigger_request_count_defaults_to_one(self):
+        self.assertEqual(_trigger_request_count("тг", "тг"), 1)
+        self.assertEqual(_trigger_request_count("дай тг", "тг"), 1)
+
+    def test_trigger_request_count_reads_number_and_caps_at_15(self):
+        self.assertEqual(_trigger_request_count("тг 5", "тг"), 5)
+        self.assertEqual(_trigger_request_count("тг 99", "тг"), 15)
+        self.assertEqual(_trigger_request_count("тг 0", "тг"), 1)
 
 
 if __name__ == "__main__":
