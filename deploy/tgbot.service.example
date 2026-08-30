@@ -1,0 +1,19 @@
+[Unit]
+Description=TGbot Telegram account bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgbot
+Group=tgbot
+WorkingDirectory=/opt/tgbot
+EnvironmentFile=/opt/tgbot/.env
+ExecStart=/opt/tgbot/.venv/bin/python /opt/tgbot/bot1.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
