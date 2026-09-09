@@ -18,12 +18,13 @@ from tglol.telegram_service import client_for
 logger = logging.getLogger(__name__)
 
 
-def _receiver_key(receiver) -> tuple | None:
+def _receiver_key(receiver, trigger_chat_id: int | None) -> tuple | None:
     if not receiver:
         return None
     return (
         receiver.session_path,
         receiver.json_effective_path or receiver.json_original_path,
+        trigger_chat_id,
     )
 
 
@@ -59,7 +60,7 @@ async def run_code_receiver_listener(bot: Bot, config: Config) -> None:
     while True:
         try:
             receiver = get_code_receiver(config)
-            desired_key = _receiver_key(receiver)
+            desired_key = _receiver_key(receiver, config.trigger_chat_id)
             if not receiver or not config.trigger_chat_id:
                 if client is not None:
                     await client.disconnect()
@@ -109,7 +110,7 @@ async def run_code_receiver_listener(bot: Bot, config: Config) -> None:
                     continue
                 update_code_receiver_status(config, "active")
                 active_key = desired_key
-                logger.info("Code receiver listener started for %s", receiver.phone or receiver.username or receiver.telegram_user_id)
+                logger.info("Code receiver listener started for %s in chat %s", receiver.phone or receiver.username or receiver.telegram_user_id, config.trigger_chat_id)
 
             await asyncio.sleep(10)
         except asyncio.CancelledError:
