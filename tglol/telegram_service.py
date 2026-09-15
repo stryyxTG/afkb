@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 import logging
@@ -162,6 +163,45 @@ async def sign_in_password(
         await client.disconnect()
 
 
+def _telegram_valid_check_error_result(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, (UserDeactivatedBanError, UserDeactivatedError)):
+        reason = "user_deactivated_ban" if isinstance(exc, UserDeactivatedBanError) else "user_deactivated"
+        return {
+            "ok": False,
+            "status": "frozen",
+            "reason": reason,
+        }
+    if isinstance(exc, AuthKeyUnregisteredError):
+        return {
+            "ok": False,
+            "status": "dead",
+            "reason": "auth_key_unregistered",
+        }
+    if isinstance(exc, SessionPasswordNeededError):
+        return {
+            "ok": False,
+            "status": "need_2fa",
+            "reason": "session_password_needed",
+        }
+    if isinstance(exc, FloodWaitError):
+        return {
+            "ok": False,
+            "status": "skipped",
+            "reason": f"flood_wait_{exc.seconds}",
+        }
+    if isinstance(exc, RPCError):
+        return {
+            "ok": False,
+            "status": "error",
+            "reason": type(exc).__name__,
+        }
+    return {
+        "ok": False,
+        "status": "error",
+        "reason": type(exc).__name__,
+    }
+
+
 async def check_account_freeze(client: TelegramClient) -> dict[str, Any]:
     try:
         me = await client.get_me()
@@ -177,54 +217,15 @@ async def check_account_freeze(client: TelegramClient) -> dict[str, Any]:
             "ok": True,
             "status": "alive",
             "reason": "ok",
+            "user": me,
             "user_id": me.id,
             "phone": getattr(me, "phone", None),
             "username": getattr(me, "username", None),
             "first_name": getattr(me, "first_name", None),
             "last_name": getattr(me, "last_name", None),
         }
-    except UserDeactivatedBanError:
-        return {
-            "ok": False,
-            "status": "frozen",
-            "reason": "user_deactivated_ban",
-        }
-    except UserDeactivatedError:
-        return {
-            "ok": False,
-            "status": "frozen",
-            "reason": "user_deactivated",
-        }
-    except AuthKeyUnregisteredError:
-        return {
-            "ok": False,
-            "status": "dead",
-            "reason": "auth_key_unregistered",
-        }
-    except SessionPasswordNeededError:
-        return {
-            "ok": False,
-            "status": "need_2fa",
-            "reason": "session_password_needed",
-        }
-    except FloodWaitError as exc:
-        return {
-            "ok": False,
-            "status": "skipped",
-            "reason": f"flood_wait_{exc.seconds}",
-        }
-    except RPCError as exc:
-        return {
-            "ok": False,
-            "status": "error",
-            "reason": type(exc).__name__,
-        }
     except Exception as exc:
-        return {
-            "ok": False,
-            "status": "error",
-            "reason": type(exc).__name__,
-        }
+        return _telegram_valid_check_error_result(exc)
 
 
 async def inspect_session_with_freeze_check(
@@ -234,8 +235,8 @@ async def inspect_session_with_freeze_check(
     runtime: dict[str, str],
 ) -> dict[str, Any]:
     client = client_for(session_path, api_id, api_hash, runtime)
-    await client.connect()
     try:
+        await client.connect()
         if not await client.is_user_authorized():
             return {
                 "ok": False,
@@ -245,19 +246,23 @@ async def inspect_session_with_freeze_check(
                 "user": None,
             }
         result = await check_account_freeze(client)
-        status = str(result.get("status") or "error")
-        account_status = "active" if status == "alive" else status
-        user = await client.get_me() if status == "alive" else None
-        return {
-            "ok": bool(result.get("ok")),
-            "status": status,
-            "account_status": account_status,
-            "reason": str(result.get("reason") or account_status),
-            "user": user,
-            **{key: value for key, value in result.items() if key not in {"ok", "status", "reason"}},
-        }
+    except Exception as exc:
+        result = _telegram_valid_check_error_result(exc)
     finally:
-        await client.disconnect()
+        with suppress(Exception):
+            await client.disconnect()
+
+    status = str(result.get("status") or "error")
+    account_status = "active" if status == "alive" else status
+    user = result.get("user") if status == "alive" else None
+    return {
+        "ok": bool(result.get("ok")),
+        "status": status,
+        "account_status": account_status,
+        "reason": str(result.get("reason") or account_status),
+        "user": user,
+        **{key: value for key, value in result.items() if key not in {"ok", "status", "reason", "user"}},
+    }
 
 async def inspect_session(
     session_path: Path,
