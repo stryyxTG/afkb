@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 import telethon
-from telethon import TelegramClient
+from telethon import TelegramClient, functions
 from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, RPCError, SessionPasswordNeededError, UserDeactivatedBanError, UserDeactivatedError
 from telethon.tl.types import User
 
@@ -212,7 +212,24 @@ async def check_account_freeze(client: TelegramClient) -> dict[str, Any]:
                 "reason": "empty_me",
             }
 
+        if getattr(me, "deleted", False):
+            return {
+                "ok": False,
+                "status": "frozen",
+                "reason": "user_deleted_flag",
+                "user": me,
+            }
+        if getattr(me, "restricted", False) or getattr(me, "restriction_reason", None):
+            return {
+                "ok": False,
+                "status": "frozen",
+                "reason": "user_restricted_flag",
+                "user": me,
+            }
+
         await client.get_dialogs(limit=1)
+        await client(functions.updates.GetStateRequest())
+        await client(functions.account.GetAuthorizationsRequest())
         return {
             "ok": True,
             "status": "alive",

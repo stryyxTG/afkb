@@ -1,10 +1,11 @@
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, SessionPasswordNeededError, UserDeactivatedBanError, UserDeactivatedError
 
-from tglol.telegram_service import inspect_session_with_freeze_check
+from tglol.telegram_service import check_account_freeze, inspect_session_with_freeze_check
 
 
 class TelegramFreezeInspectTests(unittest.IsolatedAsyncioTestCase):
@@ -69,6 +70,29 @@ class TelegramFreezeInspectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["account_status"], "skipped")
         self.assertEqual(result["reason"], "flood_wait_42")
 
+
+
+    async def test_deleted_user_flag_is_frozen(self):
+        client = AsyncMock()
+        client.get_me.return_value = SimpleNamespace(id=123, deleted=True)
+
+        result = await check_account_freeze(client)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "frozen")
+        self.assertEqual(result["reason"], "user_deleted_flag")
+        client.get_dialogs.assert_not_called()
+
+    async def test_restricted_user_flag_is_frozen(self):
+        client = AsyncMock()
+        client.get_me.return_value = SimpleNamespace(id=123, deleted=False, restricted=True, restriction_reason=[])
+
+        result = await check_account_freeze(client)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "frozen")
+        self.assertEqual(result["reason"], "user_restricted_flag")
+        client.get_dialogs.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()
