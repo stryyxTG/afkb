@@ -85,6 +85,7 @@ CODE_RETRY_WATCH_SECONDS = 2 * 60
 CODE_WATCH_MAX_CONCURRENT_POLLS = 5
 SCAN_CONCURRENCY = 5
 SCAN_ACCOUNT_TIMEOUT = 35
+BULK_CODE_LOGIN_LIMIT = 5
 _active_retry_code_tasks: set[tuple[int, int, int]] = set()
 
 
@@ -1048,7 +1049,8 @@ async def _finalize_code_login_impl(
     user,
     clear_state: bool,
     state: FSMContext | None = None,
-) -> None:
+    announce: bool = True,
+) -> int:
     session_path = _promote_login_session(
         config,
         Path(session_path),
@@ -1093,15 +1095,17 @@ async def _finalize_code_login_impl(
     )
     if clear_state and state is not None:
         await state.clear()
-    await message.answer(
-        (
-            f"Аккаунт добавлен в общее хранилище.\n"
-            f"ID: {account_id}\n"
-            f"Телефон: {fields['phone'] or '-'}"
-        ),
-        reply_markup=accounts_menu(),
-    )
+    if announce:
+        await message.answer(
+            (
+                f"Аккаунт добавлен в общее хранилище.\n"
+                f"ID: {account_id}\n"
+                f"Телефон: {fields['phone'] or '-'}"
+            ),
+            reply_markup=accounts_menu(),
+        )
 
+    return account_id
 
 @router.message(F.text == "/cancel")
 async def cancel(message: Message, state: FSMContext) -> None:
@@ -1336,22 +1340,240 @@ async def show_add_account_menu(callback: CallbackQuery, state: FSMContext) -> N
     await callback.answer()
 
 
+def _input_lines(text: str) -> list[str]:
+    return [line.strip() for line in (text or "").splitlines() if line.strip()]
+
+
+def _parse_bulk_login_phones(text: str) -> tuple[list[str], str | None]:
+    lines = _input_lines(text)
+    if not lines:
+        return [], "Отправь номер телефона."
+    if len(lines) > BULK_CODE_LOGIN_LIMIT:
+        return [], f"За раз можно максимум {BULK_CODE_LOGIN_LIMIT} номеров."
+    phones: list[str] = []
+    for index, line in enumerate(lines, start=1):
+        phone = _normalize_login_phone(line)
+        if not phone:
+            return [], f"Номер в строке {index} некорректный: {escape(line)}"
+        if phone in phones:
+            return [], f"Номер повторяется: {escape(phone)}"
+        phones.append(phone)
+    return phones, None
+
+
+def _parse_bulk_login_codes(text: str, expected_count: int) -> tuple[list[str], str | None]:
+    lines = _input_lines(text)
+    if len(lines) != expected_count:
+        return [], f"Нужно отправить {expected_count} кодов: каждый код с новой строки, в том же порядке."
+    codes: list[str] = []
+    for index, line in enumerate(lines, start=1):
+        code = _normalize_login_code(line)
+        if not 5 <= len(code) <= 8:
+            return [], f"Код в строке {index} должен быть длиной 5-8 цифр."
+        codes.append(code)
+    return codes, None
+
+
+async def _request_code_login_entry(config: Config, *, phone: str, admin_id: int) -> dict[str, Any]:
+    runtime = _code_login_runtime(config)
+    login_id = secrets.token_hex(4)
+    phone_digits = phone.lstrip("+")
+    session_path = unique_path(config.temp_dir, f"temp_session_{admin_id}_{phone_digits}_{login_id}.session")
+    try:
+        code_request = await send_code(
+            session_path,
+            phone,
+            config.telegram_api_id,
+            config.telegram_api_hash,
+            runtime,
+        )
+    except Exception as exc:
+        try:
+            session_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return {"ok": False, "phone": phone, "error": str(exc)}
+    return {
+        "ok": True,
+        "phone": phone,
+        "phone_code_hash": code_request.phone_code_hash,
+        "session_path": str(session_path),
+        "login_id": login_id,
+        "admin_id": admin_id,
+        "runtime": runtime,
+        "already_authorized": code_request.already_authorized,
+        "user": code_request.user,
+    }
+
+
+async def _complete_bulk_code_login_entry(message: Message, config: Config, entry: dict[str, Any], code: str) -> dict[str, Any]:
+    try:
+        user = await sign_in_code(
+            Path(entry["session_path"]),
+            entry["phone"],
+            code,
+            entry["phone_code_hash"],
+            config.telegram_api_id,
+            config.telegram_api_hash,
+            entry["runtime"],
+        )
+    except SessionPasswordNeededError:
+        return {"ok": False, "phone": entry["phone"], "status": "twofa", "error": "нужен 2FA"}
+    except Exception as exc:
+        logger.exception("Bulk code login sign_in failed for %s", entry.get("phone"))
+        return {"ok": False, "phone": entry["phone"], "status": "error", "error": str(exc)}
+
+    account_id = await _finalize_code_login_impl(
+        message,
+        config,
+        session_path=entry["session_path"],
+        phone=entry["phone"],
+        login_id=entry["login_id"],
+        runtime=entry["runtime"],
+        admin_id=entry.get("admin_id"),
+        twofa=None,
+        user=user,
+        clear_state=False,
+        announce=False,
+    )
+    return {"ok": True, "phone": entry["phone"], "account_id": account_id}
+
+
+async def complete_bulk_codes(message: Message, state: FSMContext, config: Config, codes: list[str]) -> None:
+    data = await state.get_data()
+    entries = list(data.get("bulk_logins") or [])
+    if not entries:
+        await message.answer("Не удалось сохранить пачку. Начни заново.", reply_markup=add_account_menu())
+        await state.clear()
+        return
+    if len(codes) != len(entries):
+        await message.answer(f"Нужно {len(entries)} кодов, а пришло {len(codes)}.")
+        return
+
+    progress = await message.answer(f"Проверяю коды: 0/{len(entries)}...")
+    results = await asyncio.gather(
+        *(_complete_bulk_code_login_entry(message, config, entry, code) for entry, code in zip(entries, codes)),
+        return_exceptions=True,
+    )
+
+    added: list[str] = []
+    errors: list[str] = []
+    for entry, result in zip(entries, results):
+        phone = entry.get("phone") or "-"
+        if isinstance(result, Exception):
+            errors.append(f"{phone}: {type(result).__name__}")
+            continue
+        if result.get("ok"):
+            added.append(f"#{result['account_id']} · {phone}")
+        else:
+            errors.append(f"{phone}: {result.get('error') or result.get('status') or 'error'}")
+
+    await state.clear()
+    try:
+        await progress.edit_text("Массовая проверка кодов завершена.")
+    except Exception:
+        pass
+
+    lines = [
+        "Массовое добавление по коду завершено.",
+        f"Добавлено: {len(added)}",
+        f"Ошибок: {len(errors)}",
+    ]
+    if added:
+        lines.extend(["", "Добавлены:", *added[:20]])
+    if errors:
+        lines.extend(["", "Ошибки:", *errors[:20]])
+    await message.answer("\n".join(lines), reply_markup=accounts_menu())
+
 @router.callback_query(F.data == "accounts:add:code")
 async def add_by_code_start(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AddByCode.waiting_phone)
     await callback.message.edit_text(
-        "Отправь номер телефона.\n\nМожно с плюсом или без него, например:\n+15074486037\n15074486037"
+        "Отправь номер телефона или до 5 номеров с новой строки.\n\n"
+        "Например:\n+15074486037\n+15074486038\n+15074486039"
     )
     await callback.answer()
 
 
 @router.message(AddByCode.waiting_phone)
 async def add_by_code_phone(message: Message, state: FSMContext, config: Config) -> None:
-    phone = _normalize_login_phone(message.text or "")
-    if not phone:
-        await message.answer("Номер некорректный. Отправь номер с префиксом страны, например: +15074486037")
+    phones, parse_error = _parse_bulk_login_phones(message.text or "")
+    if parse_error:
+        await message.answer(parse_error)
+        return
+    if len(phones) > 1:
+        admin_id = message.from_user.id if message.from_user else 0
+        progress = await message.answer(f"Отправляю секретные числа: 0/{len(phones)}...")
+        results = await asyncio.gather(
+            *(_request_code_login_entry(config, phone=phone, admin_id=admin_id) for phone in phones),
+            return_exceptions=True,
+        )
+        waiting_entries: list[dict[str, Any]] = []
+        added: list[str] = []
+        errors: list[str] = []
+        for phone, result in zip(phones, results):
+            if isinstance(result, Exception):
+                errors.append(f"{phone}: {type(result).__name__}")
+                continue
+            if not result.get("ok"):
+                errors.append(f"{phone}: {result.get('error') or 'error'}")
+                continue
+            if result.get("already_authorized") and result.get("user"):
+                account_id = await _finalize_code_login_impl(
+                    message,
+                    config,
+                    session_path=result["session_path"],
+                    phone=result["phone"],
+                    login_id=result["login_id"],
+                    runtime=result["runtime"],
+                    admin_id=result.get("admin_id"),
+                    twofa=None,
+                    user=result["user"],
+                    clear_state=False,
+                    announce=False,
+                )
+                added.append(f"#{account_id} · {phone}")
+                continue
+            if result.get("already_authorized"):
+                errors.append(f"{phone}: уже авторизован, но Telegram не вернул данные")
+                continue
+            waiting_entries.append(result)
+
+        try:
+            await progress.edit_text(f"Секретные числа отправлены: {len(waiting_entries)}/{len(phones)}")
+        except Exception:
+            pass
+        if not waiting_entries:
+            await state.clear()
+            lines = ["Пачка обработана.", f"Добавлено сразу: {len(added)}", f"Ошибок: {len(errors)}"]
+            if added:
+                lines.extend(["", "Добавлены:", *added])
+            if errors:
+                lines.extend(["", "Ошибки:", *errors])
+            await message.answer("\n".join(lines), reply_markup=accounts_menu())
+            return
+
+        await state.update_data(
+            bulk_logins=waiting_entries,
+            bulk_added=added,
+            bulk_errors=errors,
+            login_started_at=utc_now_iso(),
+        )
+        await state.set_state(AddByCode.waiting_code)
+        lines = [
+            f"Секретные числа отправлены на {len(waiting_entries)} номер(ов).",
+            "Отправь коды с новой строки в том же порядке:",
+            "",
+        ]
+        lines.extend(f"{index}. {entry['phone']}" for index, entry in enumerate(waiting_entries, start=1))
+        if added:
+            lines.extend(["", f"Уже добавлено авторизованных: {len(added)}"])
+        if errors:
+            lines.extend(["", "Ошибки отправки:", *errors[:10]])
+        await message.answer("\n".join(lines))
         return
 
+    phone = phones[0]
     runtime = _code_login_runtime(config)
     admin_id = message.from_user.id if message.from_user else 0
     login_id = secrets.token_hex(4)
@@ -1395,14 +1617,22 @@ async def add_by_code_phone(message: Message, state: FSMContext, config: Config)
         return
 
     await state.set_state(AddByCode.waiting_code)
-    await message.answer("\u0421\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e. \u0412\u0432\u0435\u0434\u0438 \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043e\u0434\u043d\u0438\u043c \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435\u043c.")
+    await message.answer("Секретное число отправлено. Введи секретное число одним сообщением.")
 
 
 @router.message(AddByCode.waiting_code)
 async def add_by_code_message_code(message: Message, state: FSMContext, config: Config) -> None:
+    data = await state.get_data()
+    bulk_logins = list(data.get("bulk_logins") or [])
+    if bulk_logins:
+        codes, parse_error = _parse_bulk_login_codes(message.text or "", len(bulk_logins))
+        if parse_error:
+            await message.answer(parse_error)
+            return
+        await complete_bulk_codes(message, state, config, codes)
+        return
     code = _normalize_login_code(message.text or "")
     await complete_code(message, state, config, code)
-
 
 @router.callback_query(AddByCode.waiting_code, F.data.startswith("code:"))
 async def add_by_code_digit(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
