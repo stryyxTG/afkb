@@ -259,8 +259,20 @@ async def _resolve_worker_identity(bot: Bot, config: Config, user_id: int) -> tu
         return "Имя пока неизвестно", None, None
 
 
+def _is_issueable_account(account) -> bool:
+    return account.status == "active" and account.account_stage not in {"issued", "processing"}
+
+
+def _clean_issueable_accounts(config: Config) -> list:
+    return [
+        account
+        for account in list_accounts_by_scope(config, excluded_account_stage=("issued", "processing"))
+        if _is_issueable_account(account)
+    ]
+
+
 def _common_account_counts(config: Config) -> tuple[int, int]:
-    clean_count = count_accounts_by_stage(config, excluded_account_stage=("issued", "processing"))
+    clean_count = len(_clean_issueable_accounts(config))
     issued_count = count_accounts_by_stage(config, account_stage="issued")
     return clean_count, issued_count
 
@@ -390,12 +402,9 @@ async def check_account_validity(account, config: Config) -> dict[str, Any]:
     if scan_status == "alive":
         status = "alive"
         ok = True
-    elif scan_status in {"dead", "frozen"}:
-        status = "dead"
+    elif scan_status in {"dead", "frozen", "need_2fa"}:
+        status = scan_status
         ok = False
-    elif scan_status == "need_2fa":
-        status = "alive"
-        ok = True
     elif scan_status == "skipped":
         status = "skipped"
         ok = False
@@ -418,18 +427,33 @@ def _scan_status_counts(results: list[dict[str, Any]]) -> dict[str, int]:
     return {
         "alive": sum(1 for item in results if item["status"] == "alive"),
         "dead": sum(1 for item in results if item["status"] == "dead"),
+        "frozen": sum(1 for item in results if item["status"] == "frozen"),
+        "need_2fa": sum(1 for item in results if item["status"] == "need_2fa"),
         "error": sum(1 for item in results if item["status"] == "error"),
         "skipped": sum(1 for item in results if item["status"] == "skipped"),
     }
 
 
-def format_valid_check_progress(*, title: str, checked: int, total: int, alive: int, dead: int, error: int, skipped: int) -> str:
+def format_valid_check_progress(
+    *,
+    title: str,
+    checked: int,
+    total: int,
+    alive: int,
+    dead: int,
+    frozen: int,
+    need_2fa: int,
+    error: int,
+    skipped: int,
+) -> str:
     return (
         f"<b>{escape(title)}</b>\n\n"
         f"Всего: <b>{total}</b>\n"
         f"Проверено: <b>{checked}</b>\n"
         f"Живых: <b>{alive}</b>\n"
         f"Мертвых: <b>{dead}</b>\n"
+        f"Замороженных: <b>{frozen}</b>\n"
+        f"2FA: <b>{need_2fa}</b>\n"
         f"Ошибок: <b>{error}</b>\n"
         f"Пропущено: <b>{skipped}</b>"
     )
@@ -459,6 +483,8 @@ async def run_accounts_valid_check(config: Config, accounts: list, *, progress_c
                     total=total,
                     alive=counts["alive"],
                     dead=counts["dead"],
+                    frozen=counts["frozen"],
+                    need_2fa=counts["need_2fa"],
                     error=counts["error"],
                     skipped=counts["skipped"],
                 )
@@ -470,6 +496,8 @@ async def run_accounts_valid_check(config: Config, accounts: list, *, progress_c
         "checked": len(results),
         "alive": [item["account"] for item in results if item["status"] == "alive"],
         "dead": [item["account"] for item in results if item["status"] == "dead"],
+        "frozen": [item["account"] for item in results if item["status"] == "frozen"],
+        "need_2fa": [item["account"] for item in results if item["status"] == "need_2fa"],
         "error": [item["account"] for item in results if item["status"] == "error"],
         "skipped": [item["account"] for item in results if item["status"] == "skipped"],
         "results": results,
@@ -786,6 +814,7 @@ async def _watch_requested_account_codes(
                     continue
                 if not current or not code_message:
                     continue
+                code_received_ids.add(account.id)
                 pending_ids.discard(account.id)
                 try:
                     await _send_code_delivery(
@@ -860,8 +889,8 @@ async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None
         accounts: list = []
         available_accounts = [
             account
-            for account in list_accounts_by_scope(config)
-            if account.account_stage not in {"issued", "processing"} and account.id not in skipped_ids
+            for account in _clean_issueable_accounts(config)
+            if account.id not in skipped_ids
         ]
         if not available_accounts:
             break
@@ -951,18 +980,13 @@ async def _show_account_page(callback: CallbackQuery, config: Config, origin: st
     if stage is None:
         total = count_accounts(config)
     elif stage == "clean":
-        total = count_accounts_by_stage(config, excluded_account_stage=("issued", "processing"))
+        total = len(_clean_issueable_accounts(config))
     else:
         total = count_accounts_by_stage(config, account_stage=stage)
 
     page = max(0, min(page, _pages(total) - 1))
     if stage == "clean":
-        accounts = list_accounts(
-            config,
-            limit=ACCOUNTS_PER_PAGE,
-            offset=page * ACCOUNTS_PER_PAGE,
-            excluded_account_stage=("issued", "processing"),
-        )
+        accounts = _clean_issueable_accounts(config)[page * ACCOUNTS_PER_PAGE:(page + 1) * ACCOUNTS_PER_PAGE]
     elif stage is None:
         accounts = list_accounts(
             config,
@@ -1183,7 +1207,7 @@ async def scan_accounts_handler(callback: CallbackQuery, config: Config) -> None
     section = callback.data.split(":", 1)[1]
     if section == "clean":
         title = "Валид-чек: чистые"
-        accounts = list_accounts_by_scope(config, excluded_account_stage=("issued", "processing"))
+        accounts = _clean_issueable_accounts(config)
     elif section == "issued":
         title = "Валид-чек: выданные"
         accounts = list_accounts_by_scope(config, account_stage="issued")
@@ -1209,12 +1233,14 @@ async def scan_accounts_handler(callback: CallbackQuery, config: Config) -> None
             total=len(accounts),
             alive=0,
             dead=0,
+            frozen=0,
+            need_2fa=0,
             error=0,
             skipped=0,
         )
     )
 
-    async def progress_cb(*, checked: int, total: int, alive: int, dead: int, error: int, skipped: int) -> None:
+    async def progress_cb(*, checked: int, total: int, alive: int, dead: int, frozen: int, need_2fa: int, error: int, skipped: int) -> None:
         nonlocal last_update
         now = time.monotonic()
         if checked != total and now - last_update < 2:
@@ -1228,6 +1254,8 @@ async def scan_accounts_handler(callback: CallbackQuery, config: Config) -> None
                     total=total,
                     alive=alive,
                     dead=dead,
+                    frozen=frozen,
+                    need_2fa=need_2fa,
                     error=error,
                     skipped=skipped,
                 )
@@ -1260,6 +1288,8 @@ async def scan_accounts_handler(callback: CallbackQuery, config: Config) -> None
             total=result["total"],
             alive=result["alive"],
             dead=result["dead"],
+            frozen=result["frozen"],
+            need_2fa=result["need_2fa"],
             error=result["error"],
             skipped=result["skipped"],
         ) + details,
@@ -2064,7 +2094,7 @@ async def download_common_stage_zip(callback: CallbackQuery, config: Config) -> 
     registration_service: str | None = None
     excluded_service: str | None = None
     if stage == "clean":
-        accounts = list_accounts_by_scope(config, excluded_account_stage=("issued", "processing"))
+        accounts = _clean_issueable_accounts(config)
     elif stage == "issued":
         accounts = list_accounts_by_scope(config, account_stage="issued")
     else:
@@ -2142,7 +2172,7 @@ async def ask_delete_common_stage(callback: CallbackQuery, config: Config) -> No
     registration_service: str | None = None
     excluded_service: str | None = None
     if stage == "clean":
-        total = count_accounts_by_stage(config, excluded_account_stage=("issued", "processing"))
+        total = len(_clean_issueable_accounts(config))
     elif stage == "issued":
         total = count_accounts_by_stage(config, account_stage="issued")
     else:
@@ -2169,7 +2199,7 @@ async def confirm_delete_common_stage(callback: CallbackQuery, config: Config) -
     registration_service: str | None = None
     excluded_service: str | None = None
     if stage == "clean":
-        accounts = list_accounts_by_scope(config, excluded_account_stage=("issued", "processing"))
+        accounts = _clean_issueable_accounts(config)
         if not accounts:
             await callback.answer("В этом разделе нет аккаунтов.", show_alert=True)
             return

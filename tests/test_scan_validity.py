@@ -69,13 +69,13 @@ class ScanValidityTests(unittest.IsolatedAsyncioTestCase):
             result = await check_account_validity(account, self.config)
         return account_id, result
 
-    async def test_frozen_account_is_dead_and_status_is_saved(self):
+    async def test_frozen_account_keeps_frozen_status_and_is_saved(self):
         account_id, result = await self.check_with_result(
             {"ok": False, "status": "frozen", "account_status": "frozen", "reason": "user_deactivated_ban"}
         )
 
         self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "dead")
+        self.assertEqual(result["status"], "frozen")
         self.assertEqual(result["reason"], "user_deactivated_ban")
         self.assertEqual(get_account(self.config, account_id).status, "frozen")
 
@@ -89,13 +89,13 @@ class ScanValidityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "flood_wait_60")
         self.assertEqual(get_account(self.config, account_id).status, "skipped")
 
-    async def test_need_2fa_counts_as_alive_but_keeps_status(self):
+    async def test_need_2fa_keeps_status_and_is_not_ok(self):
         account_id, result = await self.check_with_result(
             {"ok": False, "status": "need_2fa", "account_status": "need_2fa", "reason": "session_password_needed"}
         )
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["status"], "alive")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "need_2fa")
         self.assertEqual(get_account(self.config, account_id).status, "need_2fa")
 
 

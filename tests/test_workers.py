@@ -32,7 +32,7 @@ class AccountClaimTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def add_account(self, phone: str) -> int:
+    def add_account(self, phone: str, *, status: str = "active") -> int:
         return add_account(
             self.config,
             {
@@ -47,7 +47,7 @@ class AccountClaimTests(unittest.TestCase):
                 "json_source": "test",
                 "twofa_password": None,
                 "source_type": "test",
-                "status": "active",
+                "status": status,
                 "created_by": 1,
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "updated_at": "2026-01-01T00:00:00+00:00",
@@ -71,6 +71,20 @@ class AccountClaimTests(unittest.TestCase):
         visible = list_accounts_by_scope(self.config, excluded_account_stage=("issued", "processing"))
         self.assertEqual([account.id for account in visible], [second_id])
 
+
+
+    def test_claim_does_not_reserve_frozen_accounts(self):
+        account_id = self.add_account("50001", status="frozen")
+
+        claimed = claim_accounts_for_worker(
+            self.config,
+            [account_id],
+            worker_id=None,
+            reserve_stage="processing",
+        )
+
+        self.assertEqual(claimed, [])
+        self.assertEqual(get_account(self.config, account_id).account_stage, "nereg")
 
 if __name__ == "__main__":
     unittest.main()
