@@ -16,7 +16,7 @@ import zipfile
 from aiogram import BaseMiddleware, Bot, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, Message, TelegramObject
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject
 from telethon.errors import SessionPasswordNeededError
 
 from tglol.config import Config
@@ -28,28 +28,20 @@ from tglol.db import (
     count_accounts_by_stage,
     delete_account_row,
     delete_accounts_by_stage,
-    delete_code_receiver,
     get_account,
-    get_code_receiver,
-    get_issue_stats,
-    increment_issue_stats,
-    save_code_receiver,
     list_accounts,
     list_accounts_by_scope,
-    reset_issue_stats,
-    update_code_receiver_status,
     set_account_stage,
     update_account_status,
 )
 from tglol.desktop_profile import generated_account_json, random_desktop_runtime, utc_now_iso
-from tglol.importer import download_document, import_zip, match_zip_files, safe_extract_zip
+from tglol.importer import download_document, import_zip
 from tglol.json_utils import load_json, pick_api, pick_twofa, runtime_from_json, write_json
 from tglol.keyboards import (
     ACCOUNTS_PER_PAGE,
     account_detail_menu,
     accounts_menu,
     proxy_menu,
-    trigger_settings_menu,
     accounts_page_keyboard,
     add_account_menu,
     common_storage_sections_menu,
@@ -59,6 +51,7 @@ from tglol.keyboards import (
     confirm_delete_common_stage_menu,
     registration_filter_menu,
     registration_service_menu,
+    scan_sections_menu,
 )
 from tglol.paths import unique_path
 from tglol.proxy_utils import check_proxy, mask_proxy, parse_proxy
@@ -71,14 +64,12 @@ from tglol.registration import (
     services_from_storage,
     services_label,
 )
-from tglol.states import AddByCode, AddByZip, CodeReceiverByCode, CodeReceiverByZip, ProxyState, TriggerSettings
+from tglol.states import AddByCode, AddByZip, ProxyState
 from tglol.telegram_service import (
     get_latest_telegram_code,
     get_recent_telegram_codes,
     inspect_session,
-    prepare_account_for_giveout,
     send_code,
-    send_user_message,
     sign_in_code,
     sign_in_password,
     user_fields,
@@ -89,11 +80,11 @@ logger = logging.getLogger(__name__)
 
 CODE_WATCH_SECONDS = 10 * 60
 CODE_WATCH_POLL_SECONDS = 10
-MAX_TRIGGER_GIVEOUT_COUNT = 15
 CODE_RETRY_WATCH_SECONDS = 2 * 60
 CODE_WATCH_MAX_CONCURRENT_POLLS = 5
+SCAN_CONCURRENCY = 5
+SCAN_ACCOUNT_TIMEOUT = 35
 _active_retry_code_tasks: set[tuple[int, int, int]] = set()
-_issued_message_accounts: dict[tuple[int, int], tuple[int, int]] = {}
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -119,7 +110,9 @@ class AccessMiddleware(BaseMiddleware):
         if is_admin:
             return await handler(event, data)
 
-        is_trigger_text = isinstance(event, Message) and _matches_trigger_word(text, config.trigger_word)
+        is_trigger_text = isinstance(event, Message) and bool(
+            re.search(r"\bтг\b", text, flags=re.IGNORECASE)
+        )
         is_worker_code_button = (
             isinstance(event, CallbackQuery)
             and bool(event.data)
@@ -146,17 +139,6 @@ def _proxy_menu_text(config: Config) -> str:
     return "\u041f\u0440\u043e\u043a\u0441\u0438\n\u0421\u0435\u0439\u0447\u0430\u0441 \u043f\u0440\u043e\u043a\u0441\u0438 \u043d\u0435\u0442."
 
 
-def _trigger_menu_text(config: Config) -> str:
-    chat = str(config.trigger_chat_id) if config.trigger_chat_id is not None else "\u043d\u0435 \u0437\u0430\u0434\u0430\u043d"
-    word = config.trigger_word or "\u0442\u0433"
-    return (
-        "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0432\u044b\u0434\u0430\u0447\u0438\n"
-        f"\u0427\u0430\u0442: <code>{escape(chat)}</code>\n"
-        f"\u0421\u043b\u043e\u0432\u043e: <code>{escape(word)}</code>\n\n"
-        f"\u041f\u043e \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u0443 \u0431\u043e\u0442 \u0432\u044b\u0434\u0430\u0451\u0442 1-15 \u043d\u043e\u043c\u0435\u0440\u043e\u0432: <code>{escape(word)} 5</code>."
-    )
-
-
 def _write_env_value(name: str, value: str | None) -> None:
     path = Path(".env")
     line = f"{name}={value or ''}"
@@ -179,35 +161,6 @@ def _set_config_proxy(config: Config, value: str | None) -> None:
     cleaned = value.strip() if value else None
     _write_env_value("TELEGRAM_PROXY", cleaned)
     object.__setattr__(config, "telegram_proxy", cleaned)
-
-
-def _set_config_trigger_chat_id(config: Config, value: int | None) -> None:
-    _write_env_value("TRIGGER_CHAT_ID", str(value) if value is not None else None)
-    object.__setattr__(config, "trigger_chat_id", value)
-
-
-def _set_config_trigger_word(config: Config, value: str) -> None:
-    cleaned = value.strip()
-    _write_env_value("TRIGGER_WORD", cleaned)
-    object.__setattr__(config, "trigger_word", cleaned)
-
-
-def _matches_trigger_word(text: str, trigger_word: str) -> bool:
-    word = (trigger_word or "\u0442\u0433").strip()
-    if not word:
-        return False
-    return bool(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text or "", flags=re.IGNORECASE))
-
-
-
-def _trigger_request_count(text: str, trigger_word: str) -> int:
-    word = (trigger_word or "тг").strip()
-    if not word:
-        return 1
-    match = re.search(rf"(?<!\w){re.escape(word)}(?!\w)(?:\s+(\d{{1,3}}))?", text or "", flags=re.IGNORECASE)
-    if not match or not match.group(1):
-        return 1
-    return max(1, min(MAX_TRIGGER_GIVEOUT_COUNT, int(match.group(1))))
 
 def _pages(total: int) -> int:
     return max(1, ceil(total / ACCOUNTS_PER_PAGE))
@@ -382,111 +335,131 @@ def _account_connection_params(account, config: Config) -> tuple[int, str, dict[
     return api_id, api_hash, runtime
 
 
-def _receiver_connection_params(receiver, config: Config) -> tuple[int, str, dict[str, str]]:
-    raw_path = receiver.json_original_path or receiver.json_effective_path
-    if not raw_path:
-        raise RuntimeError("code receiver JSON file is required")
-    path = Path(raw_path)
-    if not path.exists():
-        raise RuntimeError(f"code receiver JSON file not found: {path}")
-    data = load_json(path)
-    api_id, api_hash = pick_api(data, config)
-    runtime = runtime_from_json(data)
-    if not runtime.get("proxy") and config.telegram_proxy:
-        runtime["proxy"] = config.telegram_proxy
-        runtime["proxy_source"] = "global"
-    return api_id, api_hash, runtime
-
-
-def _receiver_file_paths(receiver) -> list[Path]:
-    paths: list[Path] = []
-    for raw in (receiver.session_path, receiver.json_original_path, receiver.json_effective_path):
-        if raw:
-            path = Path(raw)
-            if path not in paths:
-                paths.append(path)
-    return paths
-
-
-def _code_receiver_label(receiver) -> str:
-    if not receiver:
-        return "\u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d"
-    return receiver.phone or receiver.username or str(receiver.telegram_user_id or "\u0431\u0435\u0437 \u0434\u0430\u043d\u043d\u044b\u0445")
-
-
-def _code_receiver_menu_text(config: Config) -> str:
-    receiver = get_code_receiver(config)
-    chat = str(config.trigger_chat_id) if config.trigger_chat_id is not None else "\u043d\u0435 \u0437\u0430\u0434\u0430\u043d"
-    word = config.trigger_word or "\u0442\u0433"
-    if receiver:
-        receiver_text = f"{escape(_code_receiver_label(receiver))} / <code>{escape(receiver.status)}</code>"
-    else:
-        receiver_text = "\u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d"
-    return (
-        "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0432\u044b\u0434\u0430\u0447\u0438\n"
-        f"\u0427\u0430\u0442: <code>{escape(chat)}</code>\n"
-        f"\u0421\u043b\u043e\u0432\u043e: <code>{escape(word)}</code>\n"
-        f"\u041f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a: {receiver_text}\n\n"
-        f"\u041f\u043e \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u0443 \u0432\u044b\u0434\u0430\u0451\u0442\u0441\u044f 1-15 \u043d\u043e\u043c\u0435\u0440\u043e\u0432: <code>{escape(word)} 5</code>. \u041a\u043e\u0434\u044b \u0438\u0449\u0443\u0442\u0441\u044f 10 \u043c\u0438\u043d\u0443\u0442."
-    )
-
-
-def _trigger_settings_markup(config: Config) -> InlineKeyboardMarkup:
-    return trigger_settings_menu(
-        has_chat=config.trigger_chat_id is not None,
-        has_code_receiver=get_code_receiver(config) is not None,
-    )
-
-async def _send_via_code_receiver(
-    config: Config,
-    *,
-    chat_id: int,
-    text: str,
-    reply_to_message_id: int | None = None,
-) -> int | None:
-    receiver = get_code_receiver(config)
-    if not receiver:
-        raise RuntimeError("code receiver is not configured")
-    session_path = Path(receiver.session_path)
+async def check_account_validity(account, config: Config) -> dict[str, Any]:
+    session_path = Path(account.session_path)
     if not session_path.exists():
-        update_code_receiver_status(config, "missing_file")
-        raise RuntimeError("code receiver session file not found")
-    api_id, api_hash, runtime = _receiver_connection_params(receiver, config)
+        update_account_status(config, account.id, "missing_file")
+        return {
+            "account": account,
+            "ok": False,
+            "status": "skipped",
+            "account_status": "missing_file",
+            "reason": "Session файл не найден",
+            "user": None,
+        }
+
     try:
-        message_id = await send_user_message(
-            session_path,
-            api_id,
-            api_hash,
-            runtime,
-            chat_id,
-            text,
-            reply_to_message_id=reply_to_message_id,
-        )
+        api_id, api_hash, runtime = _account_connection_params(account, config)
     except Exception as exc:
-        terminal_status = _terminal_code_poll_status(exc)
-        if terminal_status:
-            update_code_receiver_status(config, terminal_status)
-        raise
+        update_account_status(config, account.id, "bad_json")
+        return {
+            "account": account,
+            "ok": False,
+            "status": "skipped",
+            "account_status": "bad_json",
+            "reason": str(exc),
+            "user": None,
+        }
+
+    try:
+        account_status, user, note = await asyncio.wait_for(
+            inspect_session(session_path, api_id, api_hash, runtime),
+            timeout=SCAN_ACCOUNT_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        account_status = "error"
+        user = None
+        note = f"timeout {SCAN_ACCOUNT_TIMEOUT}s"
+    except Exception as exc:
+        account_status = "error"
+        user = None
+        note = str(exc)
+
+    update_account_status(config, account.id, account_status)
+    if account_status == "active":
+        status = "alive"
+        ok = True
+    elif account_status in {"unauthorized", "empty"}:
+        status = "dead"
+        ok = False
+    elif account_status == "twofa_required":
+        status = "alive"
+        ok = True
     else:
-        update_code_receiver_status(config, "active")
-        return message_id
+        status = "error"
+        ok = False
+
+    return {
+        "account": account,
+        "ok": ok,
+        "status": status,
+        "account_status": account_status,
+        "reason": note or account_status,
+        "user": user,
+    }
 
 
-async def _ensure_code_receiver_ready(config: Config) -> None:
-    receiver = get_code_receiver(config)
-    if not receiver:
-        raise RuntimeError("code receiver is not configured")
-    session_path = Path(receiver.session_path)
-    if not session_path.exists():
-        update_code_receiver_status(config, "missing_file")
-        raise RuntimeError("code receiver session file not found")
-    api_id, api_hash, runtime = _receiver_connection_params(receiver, config)
-    status, _user, note = await inspect_session(session_path, api_id, api_hash, runtime)
-    update_code_receiver_status(config, status)
-    if status != "active":
-        detail = f": {note}" if note else ""
-        raise RuntimeError(f"code receiver is not active: {status}{detail}")
+def _scan_status_counts(results: list[dict[str, Any]]) -> dict[str, int]:
+    return {
+        "alive": sum(1 for item in results if item["status"] == "alive"),
+        "dead": sum(1 for item in results if item["status"] == "dead"),
+        "error": sum(1 for item in results if item["status"] == "error"),
+        "skipped": sum(1 for item in results if item["status"] == "skipped"),
+    }
 
+
+def format_valid_check_progress(*, title: str, checked: int, total: int, alive: int, dead: int, error: int, skipped: int) -> str:
+    return (
+        f"<b>{escape(title)}</b>\n\n"
+        f"Всего: <b>{total}</b>\n"
+        f"Проверено: <b>{checked}</b>\n"
+        f"Живых: <b>{alive}</b>\n"
+        f"Мертвых: <b>{dead}</b>\n"
+        f"Ошибок: <b>{error}</b>\n"
+        f"Пропущено: <b>{skipped}</b>"
+    )
+
+
+async def run_accounts_valid_check(config: Config, accounts: list, *, progress_cb=None) -> dict[str, Any]:
+    semaphore = asyncio.Semaphore(SCAN_CONCURRENCY)
+    results: list[dict[str, Any]] = []
+    total = len(accounts)
+
+    async def worker(account) -> None:
+        async with semaphore:
+            result = await check_account_validity(account, config)
+            results.append(result)
+            counts = _scan_status_counts(results)
+            logger.info(
+                "Scan account result id=%s phone=%s status=%s account_status=%s reason=%s",
+                getattr(account, "id", None),
+                getattr(account, "phone", None),
+                result["status"],
+                result["account_status"],
+                result["reason"],
+            )
+            if progress_cb:
+                await progress_cb(
+                    checked=len(results),
+                    total=total,
+                    alive=counts["alive"],
+                    dead=counts["dead"],
+                    error=counts["error"],
+                    skipped=counts["skipped"],
+                )
+
+    await asyncio.gather(*(worker(account) for account in accounts))
+    counts = _scan_status_counts(results)
+    return {
+        "total": total,
+        "checked": len(results),
+        "alive": [item["account"] for item in results if item["status"] == "alive"],
+        "dead": [item["account"] for item in results if item["status"] == "dead"],
+        "error": [item["account"] for item in results if item["status"] == "error"],
+        "skipped": [item["account"] for item in results if item["status"] == "skipped"],
+        "results": results,
+        **counts,
+    }
 
 def _account_file_paths(account) -> list[Path]:
     paths: list[Path] = []
@@ -620,19 +593,32 @@ async def _send_code_delivery(
     account,
     code: str,
     requester_user_id: int,
-    config: Config,
     reply_to_message_id: int | None = None,
 ) -> None:
     phone = _phone_without_plus(account.phone)
     lines = [escape(phone), f"<code>{escape(code)}</code>"]
+    twofa = _account_twofa_password(account)
+    if twofa:
+        lines.append(f"2FA: <code>{escape(twofa)}</code>")
+    markup = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="\u041f\u043e\u043b\u0443\u0447\u0438\u0442\u044c \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u0441\u043d\u043e\u0432\u0430",
+                    callback_data=f"arc:{account.id}:{chat_id}:{requester_user_id}:{reply_to_message_id or 0}",
+                )
+            ]
+        ]
+    )
     last_error: Exception | None = None
     for attempt in range(3):
         try:
-            await _send_via_code_receiver(
-                config,
-                chat_id=chat_id,
-                text="\n".join(lines),
+            await bot.send_message(
+                chat_id,
+                "\n".join(lines),
                 reply_to_message_id=reply_to_message_id,
+                parse_mode="HTML",
+                reply_markup=markup,
             )
             return
         except Exception as exc:
@@ -716,6 +702,31 @@ async def _find_new_telegram_code_message(
     return get_account(config, account.id), None, False
 
 
+def _restore_clean_stage_after_code_timeout(config: Config, account) -> str:
+    if account.account_stage == "reg":
+        services = services_from_storage(account.registration_services, account.registration_service)
+        if services:
+            set_account_stage(config, account.id, "reg", registration_services=services)
+            return "reg"
+    set_account_stage(config, account.id, "nereg")
+    return "nereg"
+
+
+def _finalize_requested_account_stages(config: Config, accounts: list, code_received_ids: set[int]) -> dict[str, int]:
+    target_all_as_issued = bool(code_received_ids)
+    result = {"issued": 0, "restored": 0, "skipped": 0}
+    for account in accounts:
+        current = get_account(config, account.id)
+        if not current or current.account_stage != "processing":
+            result["skipped"] += 1
+            continue
+        if target_all_as_issued:
+            set_account_stage(config, account.id, "issued")
+            result["issued"] += 1
+        else:
+            _restore_clean_stage_after_code_timeout(config, account)
+            result["restored"] += 1
+    return result
 async def _watch_requested_account_codes(
     bot: Bot,
     config: Config,
@@ -769,17 +780,20 @@ async def _watch_requested_account_codes(
                         code=code_message.code,
                         requester_user_id=requester_user_id,
                         reply_to_message_id=reply_to_message_id,
-                        config=config,
                     )
                 except Exception as exc:
                     logger.warning("Cannot send Telegram code for account %s: %s", account.id, exc)
             if pending_ids and time.monotonic() < deadline:
                 await asyncio.sleep(CODE_WATCH_POLL_SECONDS)
     finally:
-        for account in accounts:
-            current = get_account(config, account.id)
-            if current and current.account_stage == "processing":
-                set_account_stage(config, account.id, "issued")
+        stage_result = _finalize_requested_account_stages(config, accounts, code_received_ids)
+        logger.info(
+            "Code watcher finalized requested accounts: code_received=%s issued=%s restored=%s skipped=%s",
+            bool(code_received_ids),
+            stage_result["issued"],
+            stage_result["restored"],
+            stage_result["skipped"],
+        )
 def _is_trigger_message(message: Message, config: Config) -> bool:
     if not config.trigger_chat_id:
         return False
@@ -788,7 +802,7 @@ def _is_trigger_message(message: Message, config: Config) -> bool:
     text = (message.text or "").strip()
     if not text:
         return False
-    return _matches_trigger_word(text, config.trigger_word)
+    return bool(re.search(r"\bтг\b", text, flags=re.IGNORECASE))
 
 
 async def _notify_owners(bot: Bot, config: Config, *, reason: str, account_phone: str | None, requester_chat_id: int | None, requester_user_id: int | None) -> None:
@@ -807,14 +821,13 @@ async def _notify_owners(bot: Bot, config: Config, *, reason: str, account_phone
 
 
 async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None:
-    requested = _trigger_request_count(getattr(message, "text", "") or "", config.trigger_word)
+    requested = 1
+    text = (message.text or "").strip().lower()
+    match = re.search(r"\bтг\b\s*(\d+)", text)
+    if match:
+        requested = int(match.group(1))
+        requested = max(1, min(requested, 20))
     requested_count = requested
-
-    try:
-        await _ensure_code_receiver_ready(config)
-    except Exception as exc:
-        await message.answer(f"\u0410\u043a\u043a\u0430\u0443\u043d\u0442-\u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a \u043d\u0435 \u0433\u043e\u0442\u043e\u0432: {escape(str(exc))}")
-        return
 
     requester_id = message.from_user.id if message.from_user else 0
     claimed_accounts: list = []
@@ -849,13 +862,10 @@ async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None
                 logger.info("Removed invalid account %s because session file missing", account.id)
                 continue
             try:
-                api_id, api_hash, runtime = _account_connection_params(account, config)
-                await prepare_account_for_giveout(session_path, api_id, api_hash, runtime)
+                _account_connection_params(account, config)
             except Exception as exc:
                 skipped_ids.add(account.id)
-                status = _terminal_code_poll_status(exc) or "preflight_unavailable"
-                update_account_status(config, account.id, status)
-                logger.info("Skipping account %s before giveout because preflight failed: %s", account.id, exc)
+                logger.info("Skipping account %s before giveout because JSON is not usable: %s", account.id, exc)
                 continue
             accounts.append(account)
             if len(accounts) >= need:
@@ -879,21 +889,7 @@ async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None
         return
     started_at = datetime.now(timezone.utc)
     phone_lines = [f"<code>{escape(_phone_without_plus(account.phone))}</code>" for account in claimed_accounts]
-    try:
-        receiver_message_id = await _send_via_code_receiver(
-            config,
-            chat_id=message.chat.id,
-            text="Номера:\n" + "\n".join(phone_lines),
-            reply_to_message_id=message.message_id,
-        )
-    except Exception as exc:
-        for account in claimed_accounts:
-            set_account_stage(config, account.id, "issued")
-        await message.answer(f"Номер зарезервирован, но посредник не смог отправить сообщение: {escape(str(exc))}")
-        return
-    if receiver_message_id is not None and len(claimed_accounts) == 1:
-        _issued_message_accounts[(message.chat.id, receiver_message_id)] = (claimed_accounts[0].id, requester_id)
-    increment_issue_stats(config, len(claimed_accounts))
+    await message.answer("\u041d\u043e\u043c\u0435\u0440\u0430:\n" + "\n".join(phone_lines), reply_to_message_id=message.message_id)
 
     watcher = asyncio.create_task(
         _watch_requested_account_codes(
@@ -902,7 +898,7 @@ async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None
             claimed_accounts,
             chat_id=message.chat.id,
             requester_user_id=requester_id,
-            reply_to_message_id=receiver_message_id or message.message_id,
+            reply_to_message_id=message.message_id,
             started_at=started_at,
         )
     )
@@ -1093,104 +1089,6 @@ async def _finalize_code_login_impl(
     )
 
 
-async def _save_code_receiver_record(
-    message: Message,
-    state: FSMContext,
-    config: Config,
-    *,
-    session_path: str | Path,
-    json_path: str | Path,
-    json_source: str,
-    source_type: str,
-    twofa: str | None,
-    user,
-    created_by: int | None,
-) -> None:
-    fields = user_fields(user)
-    now = utc_now_iso()
-    old_receiver = get_code_receiver(config)
-    save_code_receiver(
-        config,
-        {
-            "phone": fields["phone"],
-            "telegram_user_id": fields["telegram_user_id"],
-            "username": fields["username"],
-            "first_name": fields["first_name"],
-            "last_name": fields["last_name"],
-            "session_path": str(session_path),
-            "json_original_path": None if json_source == "generated" else str(json_path),
-            "json_effective_path": str(json_path),
-            "json_source": json_source,
-            "twofa_password": twofa,
-            "source_type": source_type,
-            "status": "active",
-            "created_by": created_by,
-            "created_at": now,
-            "updated_at": now,
-        },
-    )
-    if old_receiver:
-        _delete_receiver_files(config, old_receiver)
-    await state.clear()
-    await message.answer(
-        "Аккаунт-посредник сохранён.\n"
-        f"Телефон: {fields['phone'] or '-'}\n"
-        f"Username: {fields['username'] or '-'}",
-        reply_markup=_trigger_settings_markup(config),
-    )
-
-
-def _delete_receiver_files(config: Config, receiver) -> int:
-    removed = 0
-    for path in _receiver_file_paths(receiver):
-        if not _is_allowed_storage_file(config, path):
-            continue
-        try:
-            path.unlink()
-            removed += 1
-        except OSError:
-            continue
-    return removed
-
-
-async def finalize_code_receiver_login(
-    message: Message,
-    state: FSMContext,
-    config: Config,
-    *,
-    twofa: str | None,
-    user,
-) -> None:
-    data = await state.get_data()
-    session_path = _promote_login_session(config, Path(data["session_path"]), data["phone"], data["login_id"])
-    fields = user_fields(user)
-    json_path = unique_path(config.json_dir, f"receiver_{session_path.with_suffix('.json').name}")
-    generated = generated_account_json(
-        config,
-        runtime=data["runtime"],
-        twofa=twofa,
-        session_file=session_path.name,
-        phone=fields["phone"],
-        user_id=fields["telegram_user_id"],
-        username=fields["username"],
-        first_name=fields["first_name"],
-        last_name=fields["last_name"],
-    )
-    write_json(json_path, generated)
-    await _save_code_receiver_record(
-        message,
-        state,
-        config,
-        session_path=session_path,
-        json_path=json_path,
-        json_source="generated",
-        source_type="code",
-        twofa=twofa,
-        user=user,
-        created_by=data.get("admin_id") or (message.from_user.id if message.from_user else None),
-    )
-
-
 @router.message(F.text == "/cancel")
 async def cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -1198,24 +1096,17 @@ async def cancel(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Command("reset"))
-async def reset_workers_command(message: Message, state: FSMContext, config: Config) -> None:
+async def reset_workers_command(message: Message, state: FSMContext) -> None:
     await state.clear()
-    previous = reset_issue_stats(config)
-    await message.answer(
-        "Статистика выдачи сброшена.\n"
-        f"Было выдано после прошлого /reset: <b>{previous.issued_since_reset}</b>"
-    )
+    await message.answer("Логика воркеров отключена.")
 
 
 @router.message(Command("stats"))
-async def worker_stats_command(message: Message, state: FSMContext, config: Config) -> None:
+async def worker_stats_command(message: Message, state: FSMContext) -> None:
     await state.clear()
-    stats = get_issue_stats(config)
-    await message.answer(
-        "Статистика выдачи\n"
-        f"Выдано после последнего /reset: <b>{stats.issued_since_reset}</b>\n"
-        f"Последний reset: <code>{escape(stats.reset_at)}</code>"
-    )
+    await message.answer("Логика воркеров отключена.")
+
+
 @router.message(Command("workers"))
 async def workers_command(message: Message, state: FSMContext) -> None:
     await state.clear()
@@ -1249,6 +1140,105 @@ async def show_common_account_sections(callback: CallbackQuery, config: Config) 
     await callback.answer()
 
 
+
+@router.callback_query(F.data == "scan_accounts")
+async def scan_accounts_menu(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    await state.clear()
+    clean_count, issued_count = _common_account_counts(config)
+    await callback.message.edit_text(
+        "<b>Скан</b>\n\nВыбери отдел для валид-чека.",
+        reply_markup=scan_sections_menu(clean_count=clean_count, issued_count=issued_count),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("scan_accounts:"))
+async def scan_accounts_handler(callback: CallbackQuery, config: Config) -> None:
+    section = callback.data.split(":", 1)[1]
+    if section == "clean":
+        title = "Валид-чек: чистые"
+        accounts = list_accounts_by_scope(config, excluded_account_stage=("issued", "processing"))
+    elif section == "issued":
+        title = "Валид-чек: выданные"
+        accounts = list_accounts_by_scope(config, account_stage="issued")
+    else:
+        await callback.answer("Неизвестный отдел.", show_alert=True)
+        return
+
+    if not accounts:
+        clean_count, issued_count = _common_account_counts(config)
+        await callback.message.edit_text(
+            "Аккаунтов для проверки нет.",
+            reply_markup=scan_sections_menu(clean_count=clean_count, issued_count=issued_count),
+        )
+        await callback.answer()
+        return
+
+    await callback.answer("Проверка началась.")
+    last_update = 0.0
+    await callback.message.edit_text(
+        format_valid_check_progress(
+            title=title,
+            checked=0,
+            total=len(accounts),
+            alive=0,
+            dead=0,
+            error=0,
+            skipped=0,
+        )
+    )
+
+    async def progress_cb(*, checked: int, total: int, alive: int, dead: int, error: int, skipped: int) -> None:
+        nonlocal last_update
+        now = time.monotonic()
+        if checked != total and now - last_update < 2:
+            return
+        last_update = now
+        try:
+            await callback.message.edit_text(
+                format_valid_check_progress(
+                    title=f"{title}: проверка идет",
+                    checked=checked,
+                    total=total,
+                    alive=alive,
+                    dead=dead,
+                    error=error,
+                    skipped=skipped,
+                )
+            )
+        except Exception:
+            pass
+
+    result = await run_accounts_valid_check(config, accounts, progress_cb=progress_cb)
+    clean_count, issued_count = _common_account_counts(config)
+    problem_lines = []
+    for item in result["results"]:
+        if item["status"] == "alive":
+            continue
+        account = item["account"]
+        label = account.phone or account.username or account.telegram_user_id or account.id
+        problem_lines.append(
+            f"#{account.id} | {escape(str(label))} | {escape(item['account_status'])} | {escape(str(item['reason']))}"
+        )
+    if len(problem_lines) > 10:
+        problem_lines = [*problem_lines[:10], f"...и еще {len(problem_lines) - 10}"]
+
+    details = ""
+    if problem_lines:
+        details = "\n\n<b>Проблемные:</b>\n<pre>" + "\n".join(problem_lines) + "</pre>"
+
+    await callback.message.edit_text(
+        format_valid_check_progress(
+            title=f"{title}: завершено",
+            checked=result["checked"],
+            total=result["total"],
+            alive=result["alive"],
+            dead=result["dead"],
+            error=result["error"],
+            skipped=result["skipped"],
+        ) + details,
+        reply_markup=scan_sections_menu(clean_count=clean_count, issued_count=issued_count),
+    )
 
 @router.callback_query(F.data == "proxy:menu")
 async def show_proxy_menu(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
@@ -1321,271 +1311,6 @@ async def delete_proxy(callback: CallbackQuery, state: FSMContext, config: Confi
     _set_config_proxy(config, None)
     await callback.message.edit_text(_proxy_menu_text(config), reply_markup=proxy_menu(has_proxy=False))
     await callback.answer("\u041f\u0440\u043e\u043a\u0441\u0438 \u0443\u0434\u0430\u043b\u0451\u043d.")
-
-
-@router.callback_query(F.data == "trigger:menu")
-async def show_trigger_menu(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
-    await state.clear()
-    await callback.message.edit_text(
-        _code_receiver_menu_text(config),
-        reply_markup=_trigger_settings_markup(config),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "trigger:set_chat")
-async def ask_trigger_chat(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
-    await state.set_state(TriggerSettings.waiting_chat_id)
-    await callback.message.edit_text(
-        "\u041e\u0442\u043f\u0440\u0430\u0432\u044c ID \u0447\u0430\u0442\u0430 \u0434\u043b\u044f \u0432\u044b\u0434\u0430\u0447\u0438. \u0414\u043b\u044f \u0441\u0443\u043f\u0435\u0440\u0433\u0440\u0443\u043f\u043f\u044b \u043e\u043d \u043e\u0431\u044b\u0447\u043d\u043e \u043d\u0430\u0447\u0438\u043d\u0430\u0435\u0442\u0441\u044f \u0441 -100.",
-        reply_markup=_trigger_settings_markup(config),
-    )
-    await callback.answer()
-
-
-@router.message(TriggerSettings.waiting_chat_id)
-async def save_trigger_chat(message: Message, state: FSMContext, config: Config) -> None:
-    raw = (message.text or "").strip()
-    try:
-        chat_id = int(raw)
-    except ValueError:
-        await message.answer("\u041d\u0443\u0436\u0435\u043d \u0447\u0438\u0441\u043b\u043e\u0432\u043e\u0439 chat id, \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440 -1001234567890.")
-        return
-    _set_config_trigger_chat_id(config, chat_id)
-    await state.clear()
-    await message.answer(_code_receiver_menu_text(config), reply_markup=_trigger_settings_markup(config))
-
-
-@router.callback_query(F.data == "trigger:clear_chat")
-async def clear_trigger_chat(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
-    await state.clear()
-    _set_config_trigger_chat_id(config, None)
-    await callback.message.edit_text(_code_receiver_menu_text(config), reply_markup=_trigger_settings_markup(config))
-    await callback.answer("\u0427\u0430\u0442 \u0432\u044b\u0434\u0430\u0447\u0438 \u043e\u0447\u0438\u0449\u0435\u043d.")
-
-
-@router.callback_query(F.data == "trigger:set_word")
-async def ask_trigger_word(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
-    await state.set_state(TriggerSettings.waiting_word)
-    await callback.message.edit_text(
-        "\u041e\u0442\u043f\u0440\u0430\u0432\u044c \u043d\u043e\u0432\u043e\u0435 \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u043d\u043e\u0435 \u0441\u043b\u043e\u0432\u043e. \u041f\u0443\u0441\u0442\u044b\u043c \u043e\u043d\u043e \u0431\u044b\u0442\u044c \u043d\u0435 \u043c\u043e\u0436\u0435\u0442.",
-        reply_markup=_trigger_settings_markup(config),
-    )
-    await callback.answer()
-
-
-@router.message(TriggerSettings.waiting_word)
-async def save_trigger_word(message: Message, state: FSMContext, config: Config) -> None:
-    word = (message.text or "").strip()
-    if not word:
-        await message.answer("\u0422\u0440\u0438\u0433\u0433\u0435\u0440\u043d\u043e\u0435 \u0441\u043b\u043e\u0432\u043e \u043d\u0435 \u043c\u043e\u0436\u0435\u0442 \u0431\u044b\u0442\u044c \u043f\u0443\u0441\u0442\u044b\u043c.")
-        return
-    _set_config_trigger_word(config, word)
-    await state.clear()
-    await message.answer(_code_receiver_menu_text(config), reply_markup=_trigger_settings_markup(config))
-
-
-@router.callback_query(F.data == "receiver:add:code")
-async def add_receiver_by_code_start(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(CodeReceiverByCode.waiting_phone)
-    await callback.message.edit_text(
-        "\u041e\u0442\u043f\u0440\u0430\u0432\u044c \u043d\u043e\u043c\u0435\u0440 \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0430 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430-\u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430.\n\n"
-        "\u041c\u043e\u0436\u043d\u043e \u0441 \u043f\u043b\u044e\u0441\u043e\u043c \u0438\u043b\u0438 \u0431\u0435\u0437 \u043d\u0435\u0433\u043e, \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440:\n+15074486037\n15074486037"
-    )
-    await callback.answer()
-
-
-@router.message(CodeReceiverByCode.waiting_phone)
-async def add_receiver_by_code_phone(message: Message, state: FSMContext, config: Config) -> None:
-    phone = _normalize_login_phone(message.text or "")
-    if not phone:
-        await message.answer("\u041d\u043e\u043c\u0435\u0440 \u043d\u0435\u043a\u043e\u0440\u0440\u0435\u043a\u0442\u043d\u044b\u0439. \u041e\u0442\u043f\u0440\u0430\u0432\u044c \u043d\u043e\u043c\u0435\u0440 \u0441 \u043f\u0440\u0435\u0444\u0438\u043a\u0441\u043e\u043c \u0441\u0442\u0440\u0430\u043d\u044b, \u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440: +15074486037")
-        return
-
-    runtime = _code_login_runtime(config)
-    admin_id = message.from_user.id if message.from_user else 0
-    login_id = secrets.token_hex(4)
-    phone_digits = phone.lstrip("+")
-    session_path = unique_path(config.temp_dir, f"temp_receiver_{admin_id}_{phone_digits}_{login_id}.session")
-    try:
-        code_request = await send_code(
-            session_path,
-            phone,
-            config.telegram_api_id,
-            config.telegram_api_hash,
-            runtime,
-        )
-    except Exception as exc:
-        await state.clear()
-        await message.answer(
-            f"\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0443: {exc}",
-            reply_markup=_trigger_settings_markup(config),
-        )
-        return
-
-    await state.update_data(
-        phone=phone,
-        phone_code_hash=code_request.phone_code_hash,
-        session_path=str(session_path),
-        login_id=login_id,
-        admin_id=admin_id,
-        runtime=runtime,
-        code="",
-    )
-    if code_request.already_authorized and code_request.user:
-        await finalize_code_receiver_login(message, state, config, twofa=None, user=code_request.user)
-        return
-    if code_request.already_authorized:
-        await state.clear()
-        await message.answer(
-            "\u0421\u0435\u0441\u0441\u0438\u044f \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430 \u0443\u0436\u0435 \u0430\u0432\u0442\u043e\u0440\u0438\u0437\u043e\u0432\u0430\u043d\u0430, \u043d\u043e Telegram \u043d\u0435 \u0432\u0435\u0440\u043d\u0443\u043b \u0434\u0430\u043d\u043d\u044b\u0435 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430.",
-            reply_markup=_trigger_settings_markup(config),
-        )
-        return
-
-    await state.set_state(CodeReceiverByCode.waiting_code)
-    await message.answer("\u0421\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043e. \u0412\u0432\u0435\u0434\u0438 \u0435\u0433\u043e \u043e\u0434\u043d\u0438\u043c \u0441\u043e\u043e\u0431\u0449\u0435\u043d\u0438\u0435\u043c.")
-
-
-@router.message(CodeReceiverByCode.waiting_code)
-async def add_receiver_by_code_message_code(message: Message, state: FSMContext, config: Config) -> None:
-    code = _normalize_login_code(message.text or "")
-    if not code:
-        await message.answer("\u0421\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043f\u0443\u0441\u0442\u043e\u0435.")
-        return
-    if not 5 <= len(code) <= 8:
-        await message.answer("\u0421\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u0434\u043e\u043b\u0436\u043d\u043e \u0431\u044b\u0442\u044c \u0434\u043b\u0438\u043d\u043e\u0439 5-8 \u0446\u0438\u0444\u0440. \u0412\u0432\u0435\u0434\u0438 \u0437\u0430\u043d\u043e\u0432\u043e.")
-        return
-    data = await state.get_data()
-    try:
-        user = await sign_in_code(
-            Path(data["session_path"]),
-            data["phone"],
-            code,
-            data["phone_code_hash"],
-            config.telegram_api_id,
-            config.telegram_api_hash,
-            data["runtime"],
-        )
-    except SessionPasswordNeededError:
-        await state.update_data(code=code)
-        await state.set_state(CodeReceiverByCode.waiting_twofa)
-        await message.answer("\u041d\u0443\u0436\u0435\u043d \u043f\u0430\u0440\u043e\u043b\u044c 2FA \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430. \u041e\u0442\u043f\u0440\u0430\u0432\u044c \u043f\u0430\u0440\u043e\u043b\u044c.")
-        return
-    except Exception as exc:
-        logger.exception("Code receiver sign_in failed")
-        await message.answer(f"\u0412\u0445\u043e\u0434 \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430 \u043d\u0435 \u0443\u0434\u0430\u043b\u0441\u044f: {exc}\n\u0412\u0432\u0435\u0434\u0438 \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u0437\u0430\u043d\u043e\u0432\u043e.")
-        return
-    await finalize_code_receiver_login(message, state, config, twofa=None, user=user)
-
-
-@router.message(CodeReceiverByCode.waiting_twofa)
-async def add_receiver_by_code_twofa(message: Message, state: FSMContext, config: Config) -> None:
-    password = message.text or ""
-    data = await state.get_data()
-    try:
-        user = await sign_in_password(
-            Path(data["session_path"]),
-            password,
-            config.telegram_api_id,
-            config.telegram_api_hash,
-            data["runtime"],
-        )
-    except Exception as exc:
-        logger.exception("Code receiver 2FA failed")
-        await message.answer(f"\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 2FA \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430 \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0430: {exc}")
-        return
-    await finalize_code_receiver_login(message, state, config, twofa=password, user=user)
-
-
-@router.callback_query(F.data == "receiver:add:zip")
-async def add_receiver_zip_start(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(CodeReceiverByZip.waiting_zip)
-    await callback.message.edit_text("\u0417\u0430\u0433\u0440\u0443\u0437\u0438 ZIP \u0441 \u043e\u0434\u043d\u043e\u0439 \u043f\u0430\u0440\u043e\u0439 .session \u0438 .json \u0434\u043b\u044f \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430-\u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430.")
-    await callback.answer()
-
-
-@router.message(CodeReceiverByZip.waiting_zip, F.document)
-async def add_receiver_zip_file(message: Message, bot: Bot, state: FSMContext, config: Config) -> None:
-    filename = message.document.file_name or ""
-    if not filename.lower().endswith(".zip"):
-        await message.answer("\u041d\u0443\u0436\u0435\u043d \u0444\u0430\u0439\u043b \u0441 \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u0438\u0435\u043c .zip.")
-        return
-    zip_path = unique_path(config.temp_dir, filename)
-    await download_document(bot, message.document, zip_path)
-    batch_dir = unique_path(config.temp_dir, f"receiver_{zip_path.stem}")
-    try:
-        safe_extract_zip(zip_path, batch_dir)
-        matches = match_zip_files(sorted(batch_dir.glob("*.session")), sorted(batch_dir.glob("*.json")))
-        pairs = [(session_tmp, json_tmp) for session_tmp, json_tmp in matches.items() if json_tmp is not None]
-        if len(pairs) != 1:
-            raise RuntimeError("\u0412 ZIP \u0434\u043e\u043b\u0436\u043d\u0430 \u0431\u044b\u0442\u044c \u0440\u043e\u0432\u043d\u043e \u043e\u0434\u043d\u0430 \u043f\u0430\u0440\u0430 .session + .json.")
-        session_tmp, json_tmp = pairs[0]
-        final_session = unique_path(config.sessions_dir, f"receiver_{session_tmp.name}")
-        final_json = unique_path(config.json_dir, f"receiver_{json_tmp.name}")
-        final_session.parent.mkdir(parents=True, exist_ok=True)
-        final_json.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(session_tmp, final_session)
-        shutil.copy2(json_tmp, final_json)
-        data = load_json(final_json)
-        api_id, api_hash = pick_api(data, config)
-        runtime = runtime_from_json(data)
-        if not runtime.get("proxy") and config.telegram_proxy:
-            runtime["proxy"] = config.telegram_proxy
-            runtime["proxy_source"] = "global"
-        status, user, note = await inspect_session(final_session, api_id, api_hash, runtime)
-        if status != "active" or user is None:
-            detail = f": {note}" if note else ""
-            raise RuntimeError(f"Session \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430 \u043d\u0435 \u0430\u043a\u0442\u0438\u0432\u043d\u0430: {status}{detail}")
-        await _save_code_receiver_record(
-            message,
-            state,
-            config,
-            session_path=final_session,
-            json_path=final_json,
-            json_source="uploaded",
-            source_type="zip",
-            twofa=pick_twofa(data),
-            user=user,
-            created_by=message.from_user.id if message.from_user else None,
-        )
-    except Exception as exc:
-        await state.clear()
-        await message.answer(f"\u0418\u043c\u043f\u043e\u0440\u0442 \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430 \u043d\u0435 \u0443\u0434\u0430\u043b\u0441\u044f: {escape(str(exc))}", reply_markup=_trigger_settings_markup(config))
-    finally:
-        try:
-            zip_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        shutil.rmtree(batch_dir, ignore_errors=True)
-
-
-@router.callback_query(F.data == "receiver:check")
-async def check_code_receiver(callback: CallbackQuery, config: Config) -> None:
-    receiver = get_code_receiver(config)
-    if not receiver:
-        await callback.answer("\u041f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d.", show_alert=True)
-        return
-    try:
-        await _ensure_code_receiver_ready(config)
-        text = _code_receiver_menu_text(config) + "\n\n\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430: <b>\u0436\u0438\u0432\u043e\u0439</b>"
-    except Exception as exc:
-        text = _code_receiver_menu_text(config) + f"\n\n\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430: <b>\u043e\u0448\u0438\u0431\u043a\u0430</b>\n{escape(str(exc))}"
-    await callback.message.edit_text(text, reply_markup=_trigger_settings_markup(config))
-    await callback.answer("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u0437\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0430.")
-
-
-@router.callback_query(F.data == "receiver:delete")
-async def delete_code_receiver_callback(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
-    await state.clear()
-    receiver = delete_code_receiver(config)
-    removed = _delete_receiver_files(config, receiver) if receiver else 0
-    await callback.message.edit_text(
-        f"\u0410\u043a\u043a\u0430\u0443\u043d\u0442-\u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a \u0443\u0434\u0430\u043b\u0451\u043d. \u0424\u0430\u0439\u043b\u043e\u0432 \u0443\u0434\u0430\u043b\u0435\u043d\u043e: {removed}",
-        reply_markup=_trigger_settings_markup(config),
-    )
-    await callback.answer("\u041f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a \u0443\u0434\u0430\u043b\u0451\u043d.")
-
 
 @router.callback_query(F.data == "accounts:add")
 async def show_add_account_menu(callback: CallbackQuery, state: FSMContext) -> None:
@@ -1795,123 +1520,6 @@ async def add_zip_file(message: Message, bot: Bot, state: FSMContext, config: Co
     await message.answer("\n".join(lines), reply_markup=accounts_menu())
 
 
-class _GiveoutMessageAdapter:
-    def __init__(self, config: Config, *, chat_id: int, requester_user_id: int, message_id: int, text: str = ""):
-        self._config = config
-        self.chat = type("Chat", (), {"id": chat_id})()
-        self.from_user = type("User", (), {"id": requester_user_id})()
-        self.message_id = message_id
-        self.text = text
-
-    async def answer(self, text: str, **kwargs) -> None:
-        await _send_via_code_receiver(
-            self._config,
-            chat_id=self.chat.id,
-            text=text,
-            reply_to_message_id=kwargs.get("reply_to_message_id"),
-        )
-
-
-def _is_retry_code_text(text: str) -> bool:
-    value = (text or "").strip().casefold()
-    return value in {"???", "code", "/code", "??????", "???", "???"}
-
-
-async def _retry_account_code_by_text(
-    bot: Bot,
-    config: Config,
-    *,
-    chat_id: int,
-    requester_user_id: int,
-    account_id: int,
-    reply_to_message_id: int,
-) -> None:
-    task_key = (account_id, chat_id, requester_user_id)
-    if task_key in _active_retry_code_tasks:
-        await _send_via_code_receiver(
-            config,
-            chat_id=chat_id,
-            text="\u0423\u0436\u0435 \u0438\u0449\u0443 \u043d\u043e\u0432\u043e\u0435 \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043f\u043e \u044d\u0442\u043e\u043c\u0443 \u043d\u043e\u043c\u0435\u0440\u0443.",
-            reply_to_message_id=reply_to_message_id,
-        )
-        return
-    account = get_account(config, account_id)
-    if not account:
-        await _send_via_code_receiver(config, chat_id=chat_id, text="\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d.", reply_to_message_id=reply_to_message_id)
-        return
-    session_path = Path(account.session_path)
-    if not session_path.exists():
-        await _send_via_code_receiver(config, chat_id=chat_id, text="\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d.", reply_to_message_id=reply_to_message_id)
-        return
-
-    _active_retry_code_tasks.add(task_key)
-    try:
-        current, code_message, terminal = await _find_new_telegram_code_message(
-            config,
-            account,
-            started_at=datetime.now(timezone.utc),
-            deadline=time.monotonic() + CODE_RETRY_WATCH_SECONDS,
-            seen_keys=set(),
-        )
-    finally:
-        _active_retry_code_tasks.discard(task_key)
-
-    if not current:
-        await _send_via_code_receiver(config, chat_id=chat_id, text="\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d.", reply_to_message_id=reply_to_message_id)
-        return
-    if terminal:
-        await _send_via_code_receiver(config, chat_id=chat_id, text="\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u0434\u043b\u044f \u043f\u043e\u0438\u0441\u043a\u0430 \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u044b\u0445 \u0447\u0438\u0441\u0435\u043b.", reply_to_message_id=reply_to_message_id)
-        return
-    if not code_message:
-        await _send_via_code_receiver(config, chat_id=chat_id, text="\u041d\u043e\u0432\u043e\u0435 \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u0437\u0430 2 \u043c\u0438\u043d\u0443\u0442\u044b \u043d\u0435 \u043f\u0440\u0438\u0448\u043b\u043e.", reply_to_message_id=reply_to_message_id)
-        return
-    await _send_code_delivery(
-        bot,
-        chat_id=chat_id,
-        account=current,
-        code=code_message.code,
-        requester_user_id=requester_user_id,
-        config=config,
-        reply_to_message_id=reply_to_message_id,
-    )
-
-
-async def handle_code_receiver_trigger(
-    bot: Bot,
-    config: Config,
-    *,
-    chat_id: int,
-    requester_user_id: int,
-    message_id: int,
-    text: str,
-    reply_to_message_id: int | None = None,
-) -> None:
-    if not config.trigger_chat_id or chat_id != config.trigger_chat_id:
-        return
-    if _is_retry_code_text(text) and reply_to_message_id is not None:
-        mapped = _issued_message_accounts.get((chat_id, reply_to_message_id))
-        if mapped and mapped[1] == requester_user_id:
-            await _retry_account_code_by_text(
-                bot,
-                config,
-                chat_id=chat_id,
-                requester_user_id=requester_user_id,
-                account_id=mapped[0],
-                reply_to_message_id=reply_to_message_id,
-            )
-        return
-    if not _matches_trigger_word(text, config.trigger_word):
-        return
-    adapter = _GiveoutMessageAdapter(
-        config,
-        chat_id=chat_id,
-        requester_user_id=requester_user_id,
-        message_id=message_id,
-        text=text,
-    )
-    await _give_out_accounts(adapter, bot, config)
-
-
 @router.message(F.text)
 async def trigger_account_giveout(message: Message, state: FSMContext, bot: Bot, config: Config) -> None:
     current_state = await state.get_state()
@@ -1920,8 +1528,6 @@ async def trigger_account_giveout(message: Message, state: FSMContext, bot: Bot,
     if not _is_trigger_message(message, config):
         return
     if (message.text or "").strip() == "/cancel":
-        return
-    if get_code_receiver(config):
         return
     await _give_out_accounts(message, bot, config)
 
@@ -1995,33 +1601,15 @@ async def confirm_check_account(callback: CallbackQuery, config: Config) -> None
         await callback.answer("Аккаунт не найден.", show_alert=True)
         return
 
-    session_path = Path(account.session_path)
-    if not session_path.exists():
-        update_account_status(config, account_id, "missing_file")
-        account = get_account(config, account_id)
-        await callback.message.edit_text(
-            _account_detail_text(account),
-            reply_markup=account_detail_menu(
-                account.id,
-                account_stage=account.account_stage,
-                origin=origin,
-                ref_id=int(raw_ref),
-                page=int(raw_page),
-            ),
-        )
-        await callback.answer("Session файл не найден.", show_alert=True)
+    result = await check_account_validity(account, config)
+    status = result["account_status"]
+    user = result["user"]
+    note = result["reason"]
+    account = get_account(config, account_id)
+    if not account:
+        await callback.answer("Аккаунт не найден.", show_alert=True)
         return
 
-    try:
-        api_id, api_hash, runtime = _account_connection_params(account, config)
-        status, user, note = await inspect_session(session_path, api_id, api_hash, runtime)
-    except Exception as exc:
-        status = "error"
-        user = None
-        note = str(exc)
-
-    update_account_status(config, account_id, status)
-    account = get_account(config, account_id)
     text = _account_detail_text(account)
     if status == "active" and user:
         fields = user_fields(user)
@@ -2036,6 +1624,10 @@ async def confirm_check_account(callback: CallbackQuery, config: Config) -> None
         text += "\n\nПроверка: <b>Telegram не вернул данные аккаунта</b>"
     elif status == "twofa_required":
         text += "\n\nПроверка: <b>требуется 2FA</b>"
+    elif status == "missing_file":
+        text += "\n\nПроверка: <b>пропущен</b>\nSession файл не найден."
+    elif status == "bad_json":
+        text += f"\n\nПроверка: <b>пропущен</b>\n{_text(note)}"
     else:
         text += f"\n\nПроверка: <b>ошибка</b>\n{_text(note)}"
 
@@ -2050,7 +1642,6 @@ async def confirm_check_account(callback: CallbackQuery, config: Config) -> None
         ),
     )
     await callback.answer("Проверка завершена.")
-
 
 async def _send_account_code(callback: CallbackQuery, config: Config) -> None:
     account_id = int(callback.data.rsplit(":", 1)[-1])
@@ -2077,18 +1668,8 @@ async def _send_account_code(callback: CallbackQuery, config: Config) -> None:
         await callback.answer()
         return
 
-    try:
-        await _send_via_code_receiver(
-            config,
-            chat_id=callback.message.chat.id,
-            text=f"{title}: <code>{escape(code)}</code>",
-            reply_to_message_id=callback.message.message_id,
-        )
-    except Exception as exc:
-        await callback.message.answer(f"\u0421\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043d\u0430\u0439\u0434\u0435\u043d\u043e, \u043d\u043e \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a \u043d\u0435 \u0441\u043c\u043e\u0433 \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c \u0435\u0433\u043e: {escape(str(exc))}")
-        await callback.answer()
-        return
-    await callback.answer("\u0421\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043d\u0430\u0439\u0434\u0435\u043d\u043e.")
+    await callback.message.answer(f"{title}: <code>{escape(code)}</code>")
+    await callback.answer("Секретное число найдено.")
 
 
 @router.callback_query(F.data.startswith("account:request_code:"))
@@ -2158,7 +1739,6 @@ async def request_account_code(callback: CallbackQuery, config: Config, bot: Bot
             code=code_message.code,
             requester_user_id=expected_user_id,
             reply_to_message_id=expected_reply_to_message_id,
-            config=config,
         )
     except Exception as exc:
         logger.warning("Cannot send retry Telegram code for account %s: %s", account_id, exc)

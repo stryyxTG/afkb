@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from tglol.config import Config
-from tglol.db import add_account, claim_accounts_for_worker, delete_code_receiver, get_account, get_code_receiver, get_issue_stats, increment_issue_stats, init_db, list_accounts_by_scope, reset_issue_stats, save_code_receiver
+from tglol.db import add_account, claim_accounts_for_worker, get_account, init_db, list_accounts_by_scope
 
 
 class AccountClaimTests(unittest.TestCase):
@@ -71,46 +71,6 @@ class AccountClaimTests(unittest.TestCase):
         visible = list_accounts_by_scope(self.config, excluded_account_stage=("issued", "processing"))
         self.assertEqual([account.id for account in visible], [second_id])
 
-
-    def test_code_receiver_is_singleton_and_separate_from_accounts(self):
-        now = "2026-01-01T00:00:00+00:00"
-        values = {
-            "phone": "+10000000000",
-            "telegram_user_id": 777,
-            "username": "receiver",
-            "first_name": "Code",
-            "last_name": "Receiver",
-            "session_path": str(self.tmpdir / "receiver.session"),
-            "json_original_path": str(self.tmpdir / "receiver.json"),
-            "json_effective_path": str(self.tmpdir / "receiver.json"),
-            "json_source": "uploaded",
-            "twofa_password": "hidden",
-            "source_type": "zip",
-            "status": "active",
-            "created_by": 1,
-            "created_at": now,
-            "updated_at": now,
-        }
-
-        save_code_receiver(self.config, values)
-        receiver = get_code_receiver(self.config)
-
-        self.assertIsNotNone(receiver)
-        self.assertEqual(receiver.phone, "+10000000000")
-        self.assertEqual(list_accounts_by_scope(self.config), [])
-        self.assertIsNotNone(delete_code_receiver(self.config))
-        self.assertIsNone(get_code_receiver(self.config))
-
-    def test_issue_stats_increment_and_reset(self):
-        self.assertEqual(get_issue_stats(self.config).issued_since_reset, 0)
-
-        increment_issue_stats(self.config, 1)
-        increment_issue_stats(self.config, 2)
-
-        self.assertEqual(get_issue_stats(self.config).issued_since_reset, 3)
-        previous = reset_issue_stats(self.config)
-        self.assertEqual(previous.issued_since_reset, 3)
-        self.assertEqual(get_issue_stats(self.config).issued_since_reset, 0)
 
 if __name__ == "__main__":
     unittest.main()

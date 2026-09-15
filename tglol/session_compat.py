@@ -82,26 +82,18 @@ def _can_upgrade_in_place(columns: list[str], expected_columns: tuple[str, ...])
 def _sync_session_version(path: Path, expected_columns: tuple[str, ...]) -> None:
     if "tmp_auth_key" not in expected_columns:
         return
+    connection = sqlite3.connect(str(path))
     try:
-        connection = sqlite3.connect(str(path), timeout=10)
-        try:
-            version_exists = connection.execute(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'version'"
-            ).fetchone()
-            if not version_exists:
-                return
-            current = connection.execute("SELECT version FROM version LIMIT 1").fetchone()
-            if current and int(current[0]) == CURRENT_VERSION:
-                return
-            connection.execute("DELETE FROM version")
-            connection.execute("INSERT INTO version VALUES (?)", (CURRENT_VERSION,))
-            connection.commit()
-        finally:
-            connection.close()
-    except sqlite3.OperationalError as exc:
-        if "locked" in str(exc).lower():
+        version_exists = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'version'"
+        ).fetchone()
+        if not version_exists:
             return
-        raise
+        connection.execute("DELETE FROM version")
+        connection.execute("INSERT INTO version VALUES (?)", (CURRENT_VERSION,))
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _rewrite_sessions_table(path: Path, expected_columns: tuple[str, ...]) -> None:

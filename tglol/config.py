@@ -23,7 +23,6 @@ class Config:
     default_system_lang_code: str
     default_lang_pack: str
     trigger_chat_id: int | None
-    trigger_word: str = "\u0442\u0433"
 
 
 def _get_required(name: str) -> str:
@@ -81,5 +80,4 @@ def load_config() -> Config:
         default_system_lang_code=os.getenv("DEFAULT_SYSTEM_LANG_CODE", "en-US"),
         default_lang_pack=os.getenv("DEFAULT_LANG_PACK", "tdesktop"),
         trigger_chat_id=_get_optional_int("TRIGGER_CHAT_ID"),
-        trigger_word=os.getenv("TRIGGER_WORD", "\u0442\u0433").strip() or "\u0442\u0433",
     )

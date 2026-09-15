@@ -22,19 +22,3 @@ class ChangeWorkerLimit(StatesGroup):
 
 class ProxyState(StatesGroup):
     waiting_proxy = State()
-
-
-class TriggerSettings(StatesGroup):
-    waiting_chat_id = State()
-    waiting_word = State()
-
-
-
-class CodeReceiverByCode(StatesGroup):
-    waiting_phone = State()
-    waiting_code = State()
-    waiting_twofa = State()
-
-
-class CodeReceiverByZip(StatesGroup):
-    waiting_zip = State()

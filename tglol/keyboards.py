@@ -26,24 +26,8 @@ def accounts_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Добавить аккаунт", callback_data="accounts:add")
     builder.button(text="Хранилище", callback_data="accounts:common_sections")
+    builder.button(text="Скан", callback_data="scan_accounts")
     builder.button(text="\u041f\u0440\u043e\u043a\u0441\u0438", callback_data="proxy:menu")
-    builder.button(text="\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438 \u0432\u044b\u0434\u0430\u0447\u0438", callback_data="trigger:menu")
-    builder.adjust(1)
-    return builder.as_markup()
-
-
-def trigger_settings_menu(*, has_chat: bool, has_code_receiver: bool = False) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="\u0427\u0430\u0442 \u0432\u044b\u0434\u0430\u0447\u0438", callback_data="trigger:set_chat")
-    builder.button(text="\u0422\u0440\u0438\u0433\u0433\u0435\u0440\u043d\u043e\u0435 \u0441\u043b\u043e\u0432\u043e", callback_data="trigger:set_word")
-    builder.button(text="\u041f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a: \u043f\u043e \u043d\u043e\u043c\u0435\u0440\u0443", callback_data="receiver:add:code")
-    builder.button(text="\u041f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a: ZIP session/json", callback_data="receiver:add:zip")
-    if has_code_receiver:
-        builder.button(text="\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430", callback_data="receiver:check")
-        builder.button(text="\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043f\u043e\u0441\u0440\u0435\u0434\u043d\u0438\u043a\u0430", callback_data="receiver:delete")
-    if has_chat:
-        builder.button(text="\u041e\u0447\u0438\u0441\u0442\u0438\u0442\u044c \u0447\u0430\u0442", callback_data="trigger:clear_chat")
-    builder.button(text="\u041d\u0430\u0437\u0430\u0434", callback_data="accounts:menu")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -176,6 +160,13 @@ def common_storage_sections_menu(*, clean_count: int, issued_count: int = 0) -> 
     return builder.as_markup()
 
 
+def scan_sections_menu(*, clean_count: int, issued_count: int = 0) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"Чистые · {clean_count}", callback_data="scan_accounts:clean")
+    builder.button(text=f"Выданные · {issued_count}", callback_data="scan_accounts:issued")
+    builder.button(text="Назад", callback_data="accounts:menu")
+    builder.adjust(1)
+    return builder.as_markup()
 def confirm_delete_account_menu(account_id: int, origin: str, ref_id: int, page: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="ДА, УДАЛИТЬ", callback_data=f"account:delete_confirm:{account_id}:{origin}:{ref_id}:{page}")

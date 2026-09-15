@@ -70,37 +70,5 @@ class JsonUtilsTests(unittest.TestCase):
         self.assertEqual(runtime["app_version"], "6.9.3 x64")
 
 
-    def test_runtime_reads_split_proxy_fields(self):
-        runtime = runtime_from_json(
-            {
-                "proxy_type": 2,
-                "proxy_host": "127.0.0.1",
-                "proxy_port": "1080",
-                "proxy_login": "user",
-                "proxy_password": "pass",
-            }
-        )
-        self.assertEqual(
-            runtime["proxy"],
-            {
-                "host": "127.0.0.1",
-                "port": 1080,
-                "type": 2,
-                "username": "user",
-                "password": "pass",
-            },
-        )
-        self.assertEqual(runtime["proxy_source"], "json")
-
-    def test_runtime_proxy_value_has_priority_over_split_fields(self):
-        runtime = runtime_from_json(
-            {
-                "proxy": "host:1080",
-                "proxy_host": "other",
-                "proxy_port": 9999,
-            }
-        )
-        self.assertEqual(runtime["proxy"], "host:1080")
-
 if __name__ == "__main__":
     unittest.main()

@@ -31,32 +31,6 @@ CREATE TABLE IF NOT EXISTS accounts (
     updated_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS issue_stats (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    issued_since_reset INTEGER NOT NULL DEFAULT 0,
-    reset_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS code_receiver_account (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    phone TEXT,
-    telegram_user_id INTEGER,
-    username TEXT,
-    first_name TEXT,
-    last_name TEXT,
-    session_path TEXT NOT NULL,
-    json_original_path TEXT,
-    json_effective_path TEXT,
-    json_source TEXT NOT NULL,
-    twofa_password TEXT,
-    source_type TEXT NOT NULL,
-    status TEXT NOT NULL,
-    created_by INTEGER,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
 """
 
 
@@ -114,31 +88,6 @@ class WorkerResetResult:
     requested_count: int
     issued_count: int
 
-@dataclass(frozen=True)
-class IssueStats:
-    issued_since_reset: int
-    reset_at: str
-    updated_at: str
-
-
-@dataclass(frozen=True)
-class CodeReceiverAccount:
-    id: int
-    phone: str | None
-    telegram_user_id: int | None
-    username: str | None
-    first_name: str | None
-    last_name: str | None
-    session_path: str
-    json_original_path: str | None
-    json_effective_path: str | None
-    json_source: str
-    twofa_password: str | None
-    source_type: str
-    status: str
-    created_by: int | None
-    created_at: str
-    updated_at: str
 
 def connect(config: Config) -> sqlite3.Connection:
     connection = sqlite3.connect(config.db_path)
@@ -149,7 +98,6 @@ def connect(config: Config) -> sqlite3.Connection:
 def init_db(config: Config) -> None:
     with connect(config) as connection:
         connection.executescript(SCHEMA)
-        connection.execute("INSERT OR IGNORE INTO issue_stats (id) VALUES (1)")
         _ensure_column(connection, "accounts", "account_stage", "TEXT NOT NULL DEFAULT 'nereg'")
         _ensure_column(connection, "accounts", "registration_service", "TEXT")
         _ensure_column(connection, "accounts", "registration_services", "TEXT")
@@ -160,13 +108,6 @@ def init_db(config: Config) -> None:
             WHERE registration_services IS NULL
               AND registration_service IS NOT NULL
               AND registration_service != ''
-            """
-        )
-        connection.execute(
-            """
-            UPDATE accounts
-            SET account_stage = 'issued', updated_at = datetime('now')
-            WHERE account_stage = 'processing'
             """
         )
 
@@ -236,69 +177,6 @@ def _account_from_row(row: sqlite3.Row) -> Account:
 
 def _worker_from_row(row: sqlite3.Row) -> Worker:
     return Worker(**dict(row))
-
-
-
-def _code_receiver_from_row(row: sqlite3.Row) -> CodeReceiverAccount:
-    return CodeReceiverAccount(**dict(row))
-
-
-def get_code_receiver(config: Config) -> CodeReceiverAccount | None:
-    with connect(config) as connection:
-        row = connection.execute("SELECT * FROM code_receiver_account WHERE id = 1").fetchone()
-    return _code_receiver_from_row(row) if row else None
-
-
-def save_code_receiver(config: Config, values: dict[str, Any]) -> None:
-    payload = dict(values)
-    payload["id"] = 1
-    columns = (
-        "id", "phone", "telegram_user_id", "username", "first_name", "last_name",
-        "session_path", "json_original_path", "json_effective_path", "json_source",
-        "twofa_password", "source_type", "status", "created_by", "created_at", "updated_at",
-    )
-    with connect(config) as connection:
-        connection.execute(
-            f"""
-            INSERT INTO code_receiver_account ({', '.join(columns)})
-            VALUES ({', '.join(':' + column for column in columns)})
-            ON CONFLICT(id) DO UPDATE SET
-                phone = excluded.phone,
-                telegram_user_id = excluded.telegram_user_id,
-                username = excluded.username,
-                first_name = excluded.first_name,
-                last_name = excluded.last_name,
-                session_path = excluded.session_path,
-                json_original_path = excluded.json_original_path,
-                json_effective_path = excluded.json_effective_path,
-                json_source = excluded.json_source,
-                twofa_password = excluded.twofa_password,
-                source_type = excluded.source_type,
-                status = excluded.status,
-                created_by = excluded.created_by,
-                created_at = excluded.created_at,
-                updated_at = excluded.updated_at
-            """,
-            {column: payload.get(column) for column in columns},
-        )
-
-
-def update_code_receiver_status(config: Config, status: str) -> None:
-    with connect(config) as connection:
-        connection.execute(
-            "UPDATE code_receiver_account SET status = ?, updated_at = datetime('now') WHERE id = 1",
-            (status,),
-        )
-
-
-def delete_code_receiver(config: Config) -> CodeReceiverAccount | None:
-    with connect(config) as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        row = connection.execute("SELECT * FROM code_receiver_account WHERE id = 1").fetchone()
-        if row is None:
-            return None
-        connection.execute("DELETE FROM code_receiver_account WHERE id = 1")
-    return _code_receiver_from_row(row)
 
 
 def get_worker(config: Config, user_id: int) -> Worker | None:
@@ -579,54 +457,6 @@ def reset_worker_limits(config: Config) -> list[WorkerResetResult]:
         connection.execute("DELETE FROM worker_requests")
         return results
 
-def get_issue_stats(config: Config) -> IssueStats:
-    with connect(config) as connection:
-        connection.execute("INSERT OR IGNORE INTO issue_stats (id) VALUES (1)")
-        row = connection.execute(
-            "SELECT issued_since_reset, reset_at, updated_at FROM issue_stats WHERE id = 1"
-        ).fetchone()
-    return IssueStats(
-        issued_since_reset=int(row["issued_since_reset"]),
-        reset_at=str(row["reset_at"]),
-        updated_at=str(row["updated_at"]),
-    )
-
-
-def increment_issue_stats(config: Config, count: int) -> None:
-    if count <= 0:
-        return
-    with connect(config) as connection:
-        connection.execute("INSERT OR IGNORE INTO issue_stats (id) VALUES (1)")
-        connection.execute(
-            """
-            UPDATE issue_stats
-            SET issued_since_reset = issued_since_reset + ?, updated_at = datetime('now')
-            WHERE id = 1
-            """,
-            (count,),
-        )
-
-
-def reset_issue_stats(config: Config) -> IssueStats:
-    with connect(config) as connection:
-        connection.execute("INSERT OR IGNORE INTO issue_stats (id) VALUES (1)")
-        previous = connection.execute(
-            "SELECT issued_since_reset, reset_at, updated_at FROM issue_stats WHERE id = 1"
-        ).fetchone()
-        connection.execute(
-            """
-            UPDATE issue_stats
-            SET issued_since_reset = 0,
-                reset_at = datetime('now'),
-                updated_at = datetime('now')
-            WHERE id = 1
-            """
-        )
-    return IssueStats(
-        issued_since_reset=int(previous["issued_since_reset"]),
-        reset_at=str(previous["reset_at"]),
-        updated_at=str(previous["updated_at"]),
-    )
 
 def add_account(config: Config, values: dict[str, Any]) -> int:
     columns = ", ".join(values.keys())

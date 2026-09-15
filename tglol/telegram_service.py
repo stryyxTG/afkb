@@ -10,7 +10,6 @@ from typing import Any
 import telethon
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
-from telethon.tl import functions
 from telethon.tl.types import User
 
 from tglol.proxy_utils import mask_proxy, proxy_to_telethon
@@ -19,8 +18,7 @@ from tglol.session_compat import telethon_compatible_session_path
 
 CODE_RE = re.compile(r"(?<!\d)(\d[\d\s-]{2,14}\d)(?!\d)")
 CODE_CONTEXT_RE = re.compile(r"\b(code|otp|passcode|парол|код|подтверж)\b", re.IGNORECASE)
-VERIFICATION_CODE_PEERS = ("VerificationCodes", "@VerificationCodes")
-VERIFICATION_CODE_DIALOG_NAMES = ("Verification Codes", "VerificationCodes")
+TELEGRAM_CODE_PEERS = (777000, "Telegram")
 logger = logging.getLogger(__name__)
 
 
@@ -47,8 +45,6 @@ def client_for(
     api_id: int,
     api_hash: str,
     runtime: dict[str, str],
-    *,
-    receive_updates: bool = False,
 ) -> TelegramClient:
     proxy = runtime.get("proxy")
     proxy_kwargs = proxy_to_telethon(proxy)
@@ -73,7 +69,7 @@ def client_for(
         app_version=runtime.get("app_version") or "6.9.3 x64",
         lang_code="en",
         system_lang_code="en-US",
-        receive_updates=receive_updates,
+        receive_updates=False,
         connection_retries=6,
         request_retries=6,
         retry_delay=1,
@@ -228,13 +224,6 @@ def _entity_key(entity) -> tuple[str, int | str]:
     return type(entity).__name__, getattr(entity, "id", repr(entity))
 
 
-async def _set_online(client: TelegramClient) -> None:
-    try:
-        await client(functions.account.UpdateStatusRequest(offline=False))
-    except Exception as exc:
-        logger.info("Cannot set account online: %s", exc)
-
-
 async def _resolve_code_entities(
     client: TelegramClient,
     *,
@@ -271,68 +260,6 @@ async def _resolve_code_entities(
     return entities
 
 
-async def prepare_account_for_giveout(
-    session_path: Path,
-    api_id: int,
-    api_hash: str,
-    runtime: dict[str, str],
-    *,
-    dialog_limit: int = 12,
-) -> None:
-    client = client_for(session_path, api_id, api_hash, runtime)
-    await client.connect()
-    try:
-        if not await client.is_user_authorized():
-            raise RuntimeError("session is not authorized")
-
-        await client.get_me()
-        await _set_online(client)
-
-        try:
-            async for _dialog in client.iter_dialogs(limit=dialog_limit):
-                pass
-        except Exception as exc:
-            logger.info("Cannot read dialogs during giveout preflight: %s", exc)
-
-        try:
-            await client(functions.contacts.GetContactsRequest(hash=0))
-        except Exception as exc:
-            logger.info("Cannot read contacts during giveout preflight: %s", exc)
-
-        try:
-            await client(functions.contacts.GetBlockedRequest(offset=0, limit=20))
-        except Exception as exc:
-            logger.info("Cannot read blocked users during giveout preflight: %s", exc)
-    finally:
-        await client.disconnect()
-
-
-async def send_user_message(
-    session_path: Path,
-    api_id: int,
-    api_hash: str,
-    runtime: dict[str, str],
-    chat_id: int,
-    text: str,
-    *,
-    reply_to_message_id: int | None = None,
-) -> int | None:
-    client = client_for(session_path, api_id, api_hash, runtime)
-    await client.connect()
-    try:
-        if not await client.is_user_authorized():
-            raise RuntimeError("session is not authorized")
-        await _set_online(client)
-        message = await client.send_message(
-            chat_id,
-            text,
-            reply_to=reply_to_message_id,
-            parse_mode="html",
-        )
-        return getattr(message, "id", None)
-    finally:
-        await client.disconnect()
-
 async def _get_recent_code_messages_from_peers(
     session_path: Path,
     api_id: int,
@@ -349,8 +276,6 @@ async def _get_recent_code_messages_from_peers(
     try:
         if not await client.is_user_authorized():
             raise RuntimeError("session is not authorized")
-
-        await _set_online(client)
 
         result: list[TelegramCodeMessage] = []
         entities = await _resolve_code_entities(client, peers=peers, dialog_names=dialog_names)
@@ -392,8 +317,6 @@ async def _get_latest_code_from_peers(
         if not await client.is_user_authorized():
             raise RuntimeError("session is not authorized")
 
-        await _set_online(client)
-
         latest_code: str | None = None
         latest_date = None
         entities = await _resolve_code_entities(client, peers=peers, dialog_names=dialog_names)
@@ -429,8 +352,7 @@ async def get_recent_telegram_codes(
         api_id,
         api_hash,
         runtime,
-        peers=VERIFICATION_CODE_PEERS,
-        dialog_names=VERIFICATION_CODE_DIALOG_NAMES,
+        peers=TELEGRAM_CODE_PEERS,
         limit=limit,
     )
 
@@ -448,8 +370,7 @@ async def get_latest_telegram_code(
         api_id,
         api_hash,
         runtime,
-        peers=VERIFICATION_CODE_PEERS,
-        dialog_names=VERIFICATION_CODE_DIALOG_NAMES,
+        peers=TELEGRAM_CODE_PEERS,
         limit=limit,
     )
 

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import re
-import socket
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -13,10 +12,6 @@ except ImportError:  # pragma: no cover - exercised only without dependency inst
     socks = None
 
 from telethon.network.connection.tcpmtproxy import ConnectionTcpMTProxyRandomizedIntermediate
-
-
-TELEGRAM_CONNECT_CHECK_HOST = "149.154.167.50"
-TELEGRAM_CONNECT_CHECK_PORT = 443
 
 
 PROXY_TYPE_ALIASES = {
@@ -310,10 +305,6 @@ async def check_proxy(proxy: str | ProxySettings | None, *, timeout: float = 10.
     settings = parse_proxy(proxy)
     if settings is None:
         return True
-    if not settings.is_mtproto:
-        if socks is None:
-            raise RuntimeError("PySocks is required for SOCKS/HTTP proxies")
-        return await asyncio.to_thread(_check_socks_proxy, settings, timeout)
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(settings.host, settings.port),
@@ -324,28 +315,3 @@ async def check_proxy(proxy: str | ProxySettings | None, *, timeout: float = 10.
         return True
     except Exception:
         return False
-
-
-def _check_socks_proxy(settings: ProxySettings, timeout: float) -> bool:
-    type_map = {
-        "socks5": socks.SOCKS5,
-        "socks4": socks.SOCKS4,
-        "http": socks.HTTP,
-    }
-    sock = socks.socksocket()
-    sock.settimeout(timeout)
-    try:
-        sock.set_proxy(
-            type_map[settings.kind],
-            settings.host,
-            settings.port,
-            rdns=settings.rdns,
-            username=settings.username,
-            password=settings.password,
-        )
-        sock.connect((TELEGRAM_CONNECT_CHECK_HOST, TELEGRAM_CONNECT_CHECK_PORT))
-        return True
-    except (OSError, socket.timeout):
-        return False
-    finally:
-        sock.close()

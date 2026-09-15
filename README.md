@@ -13,8 +13,8 @@ Telegram bot for storing Telegram sessions, issuing account phone numbers by tri
 ## Local/Manual Start
 
 ```bash
-git clone https://github.com/stryyxTG/afkb.git
-cd afkb
+git clone https://github.com/stryyxTG/TGbot.git
+cd TGbot
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -32,7 +32,6 @@ TELEGRAM_API_ID=2040
 TELEGRAM_API_HASH=...
 TELEGRAM_PROXY=
 TRIGGER_CHAT_ID=-1001234567890
-TRIGGER_WORD=тг
 ```
 
 `storage/` is created locally and contains the SQLite database, uploaded sessions and JSON files. Do not commit it.
@@ -47,7 +46,7 @@ sudo apt install -y git python3 python3-venv python3-pip
 sudo useradd --system --create-home --shell /usr/sbin/nologin tgbot || true
 sudo mkdir -p /opt/tgbot
 sudo chown -R tgbot:tgbot /opt/tgbot
-sudo -u tgbot git clone https://github.com/stryyxTG/afkb.git /opt/tgbot
+sudo -u tgbot git clone https://github.com/stryyxTG/TGbot.git /opt/tgbot
 cd /opt/tgbot
 sudo -u tgbot python3 -m venv .venv
 sudo -u tgbot .venv/bin/pip install -r requirements.txt

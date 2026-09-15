@@ -61,31 +61,6 @@ def pick_int(data: dict[str, Any], *keys: str) -> int | None:
     return None
 
 
-def _pick_proxy_mapping(data: dict[str, Any]) -> dict[str, Any] | None:
-    host = pick_str(data, "proxy_host", "proxy_addr", "proxy_server", "proxy_ip")
-    port = pick_int(data, "proxy_port")
-    if not host or port is None:
-        return None
-
-    result: dict[str, Any] = {
-        "host": host,
-        "port": port,
-    }
-    proxy_type = data.get("proxy_type") or data.get("proxy_kind") or data.get("proxy_scheme")
-    if proxy_type not in (None, ""):
-        result["type"] = proxy_type
-    username = pick_str(data, "proxy_username", "proxy_user", "proxy_login")
-    password = pick_str(data, "proxy_password", "proxy_pass")
-    secret = pick_str(data, "proxy_secret")
-    if username:
-        result["username"] = username
-    if password:
-        result["password"] = password
-    if secret:
-        result["secret"] = secret
-    return result
-
-
 def runtime_from_json(data: dict[str, Any]) -> dict[str, Any]:
     runtime: dict[str, Any] = {
         "device": pick_str(data, "device_model", "device") or "Desktop",
@@ -101,11 +76,6 @@ def runtime_from_json(data: dict[str, Any]) -> dict[str, Any]:
             runtime["proxy"] = value
             runtime["proxy_source"] = "json"
             break
-    else:
-        proxy_mapping = _pick_proxy_mapping(data)
-        if proxy_mapping:
-            runtime["proxy"] = proxy_mapping
-            runtime["proxy_source"] = "json"
     return runtime
 
 
