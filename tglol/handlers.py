@@ -809,6 +809,19 @@ async def _watch_requested_account_codes(
             stage_result["restored"],
             stage_result["skipped"],
         )
+def _parse_trigger_request_count(text: str) -> int:
+    text = (text or "").strip().lower()
+    patterns = (
+        r"\bтг\b\s*(\d+)",
+        r"(\d+)\s*\bтг\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return max(1, min(int(match.group(1)), 20))
+    return 1
+
+
 def _is_trigger_message(message: Message, config: Config) -> bool:
     if not config.trigger_chat_id:
         return False
@@ -836,12 +849,7 @@ async def _notify_owners(bot: Bot, config: Config, *, reason: str, account_phone
 
 
 async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None:
-    requested = 1
-    text = (message.text or "").strip().lower()
-    match = re.search(r"\bтг\b\s*(\d+)", text)
-    if match:
-        requested = int(match.group(1))
-        requested = max(1, min(requested, 20))
+    requested = _parse_trigger_request_count(message.text or "")
     requested_count = requested
 
     requester_id = message.from_user.id if message.from_user else 0
