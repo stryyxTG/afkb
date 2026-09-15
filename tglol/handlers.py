@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from math import ceil
 from pathlib import Path
@@ -81,6 +81,7 @@ logger = logging.getLogger(__name__)
 
 CODE_WATCH_SECONDS = 10 * 60
 CODE_WATCH_POLL_SECONDS = 10
+CODE_WATCH_DATE_GRACE_SECONDS = 120
 CODE_RETRY_WATCH_SECONDS = 2 * 60
 CODE_WATCH_MAX_CONCURRENT_POLLS = 5
 SCAN_CONCURRENCY = 5
@@ -618,7 +619,7 @@ def _code_message_is_new(message, started_at: datetime) -> bool:
         return True
     if message_date.tzinfo is None:
         message_date = message_date.replace(tzinfo=timezone.utc)
-    return message_date >= started_at
+    return message_date >= started_at - timedelta(seconds=CODE_WATCH_DATE_GRACE_SECONDS)
 
 
 

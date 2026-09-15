@@ -413,15 +413,16 @@ async def _resolve_code_entities(
         except Exception as exc:
             logger.info("Cannot resolve code peer %s: %s", peer, exc)
 
+    target_ids = {peer for peer in peers if isinstance(peer, int)}
     target_names = {_dialog_name_key(name) for name in dialog_names}
-    if target_names:
+    if target_ids or target_names:
         async for dialog in client.iter_dialogs(limit=100):
             entity = dialog.entity
             names = {
                 _dialog_name_key(dialog.name),
                 _dialog_name_key(getattr(entity, "username", None)),
             }
-            if names & target_names:
+            if getattr(entity, "id", None) in target_ids or names & target_names:
                 add_entity(entity)
 
     return entities
