@@ -69,6 +69,7 @@ from tglol.telegram_service import (
     get_latest_telegram_code,
     get_recent_telegram_codes,
     inspect_session,
+    inspect_session_with_freeze_check,
     send_code,
     sign_in_code,
     sign_in_password,
@@ -362,40 +363,53 @@ async def check_account_validity(account, config: Config) -> dict[str, Any]:
         }
 
     try:
-        account_status, user, note = await asyncio.wait_for(
-            inspect_session(session_path, api_id, api_hash, runtime),
+        result = await asyncio.wait_for(
+            inspect_session_with_freeze_check(session_path, api_id, api_hash, runtime),
             timeout=SCAN_ACCOUNT_TIMEOUT,
         )
     except asyncio.TimeoutError:
-        account_status = "error"
-        user = None
-        note = f"timeout {SCAN_ACCOUNT_TIMEOUT}s"
+        result = {
+            "ok": False,
+            "status": "error",
+            "account_status": "error",
+            "reason": f"timeout {SCAN_ACCOUNT_TIMEOUT}s",
+            "user": None,
+        }
     except Exception as exc:
-        account_status = "error"
-        user = None
-        note = str(exc)
+        result = {
+            "ok": False,
+            "status": "error",
+            "account_status": "error",
+            "reason": str(exc),
+            "user": None,
+        }
 
-    update_account_status(config, account.id, account_status)
-    if account_status == "active":
+    account_status = str(result.get("account_status") or result.get("status") or "error")
+    scan_status = str(result.get("status") or "error")
+    if scan_status == "alive":
         status = "alive"
         ok = True
-    elif account_status in {"unauthorized", "empty"}:
+    elif scan_status in {"dead", "frozen"}:
         status = "dead"
         ok = False
-    elif account_status == "twofa_required":
+    elif scan_status == "need_2fa":
         status = "alive"
         ok = True
+    elif scan_status == "skipped":
+        status = "skipped"
+        ok = False
     else:
         status = "error"
         ok = False
 
+    update_account_status(config, account.id, account_status)
     return {
         "account": account,
         "ok": ok,
         "status": status,
         "account_status": account_status,
-        "reason": note or account_status,
-        "user": user,
+        "reason": str(result.get("reason") or account_status),
+        "user": result.get("user"),
     }
 
 

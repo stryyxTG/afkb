@@ -9,7 +9,7 @@ from typing import Any
 
 import telethon
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
+from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, RPCError, SessionPasswordNeededError, UserDeactivatedBanError, UserDeactivatedError
 from telethon.tl.types import User
 
 from tglol.proxy_utils import mask_proxy, proxy_to_telethon
@@ -161,6 +161,103 @@ async def sign_in_password(
     finally:
         await client.disconnect()
 
+
+async def check_account_freeze(client: TelegramClient) -> dict[str, Any]:
+    try:
+        me = await client.get_me()
+        if not me:
+            return {
+                "ok": False,
+                "status": "dead",
+                "reason": "empty_me",
+            }
+
+        await client.get_dialogs(limit=1)
+        return {
+            "ok": True,
+            "status": "alive",
+            "reason": "ok",
+            "user_id": me.id,
+            "phone": getattr(me, "phone", None),
+            "username": getattr(me, "username", None),
+            "first_name": getattr(me, "first_name", None),
+            "last_name": getattr(me, "last_name", None),
+        }
+    except UserDeactivatedBanError:
+        return {
+            "ok": False,
+            "status": "frozen",
+            "reason": "user_deactivated_ban",
+        }
+    except UserDeactivatedError:
+        return {
+            "ok": False,
+            "status": "frozen",
+            "reason": "user_deactivated",
+        }
+    except AuthKeyUnregisteredError:
+        return {
+            "ok": False,
+            "status": "dead",
+            "reason": "auth_key_unregistered",
+        }
+    except SessionPasswordNeededError:
+        return {
+            "ok": False,
+            "status": "need_2fa",
+            "reason": "session_password_needed",
+        }
+    except FloodWaitError as exc:
+        return {
+            "ok": False,
+            "status": "skipped",
+            "reason": f"flood_wait_{exc.seconds}",
+        }
+    except RPCError as exc:
+        return {
+            "ok": False,
+            "status": "error",
+            "reason": type(exc).__name__,
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "error",
+            "reason": type(exc).__name__,
+        }
+
+
+async def inspect_session_with_freeze_check(
+    session_path: Path,
+    api_id: int,
+    api_hash: str,
+    runtime: dict[str, str],
+) -> dict[str, Any]:
+    client = client_for(session_path, api_id, api_hash, runtime)
+    await client.connect()
+    try:
+        if not await client.is_user_authorized():
+            return {
+                "ok": False,
+                "status": "dead",
+                "account_status": "unauthorized",
+                "reason": "unauthorized",
+                "user": None,
+            }
+        result = await check_account_freeze(client)
+        status = str(result.get("status") or "error")
+        account_status = "active" if status == "alive" else status
+        user = await client.get_me() if status == "alive" else None
+        return {
+            "ok": bool(result.get("ok")),
+            "status": status,
+            "account_status": account_status,
+            "reason": str(result.get("reason") or account_status),
+            "user": user,
+            **{key: value for key, value in result.items() if key not in {"ok", "status", "reason"}},
+        }
+    finally:
+        await client.disconnect()
 
 async def inspect_session(
     session_path: Path,
