@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from tglol.config import Config
 from tglol.db import add_account, get_account, init_db
-from tglol.handlers import check_account_validity
+from tglol.handlers import check_account_validity, run_accounts_valid_check
 
 
 class ScanValidityTests(unittest.IsolatedAsyncioTestCase):
@@ -98,6 +98,43 @@ class ScanValidityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "need_2fa")
         self.assertEqual(get_account(self.config, account_id).status, "need_2fa")
 
+
+
+    async def test_run_valid_check_retries_failed_accounts_once(self):
+        account_id = self.add_account()
+        account = get_account(self.config, account_id)
+        attempts = []
+
+        async def fake_check(item, config):
+            attempts.append(item.id)
+            if len(attempts) == 1:
+                return {
+                    "account": item,
+                    "ok": False,
+                    "status": "error",
+                    "account_status": "error",
+                    "reason": "temporary",
+                    "user": None,
+                }
+            return {
+                "account": item,
+                "ok": True,
+                "status": "alive",
+                "account_status": "active",
+                "reason": "ok",
+                "user": object(),
+            }
+
+        with patch("tglol.handlers.check_account_validity", side_effect=fake_check):
+            result = await run_accounts_valid_check(self.config, [account])
+
+        self.assertEqual(attempts, [account_id, account_id])
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(result["checked"], 1)
+        self.assertEqual(result["alive"], 1)
+        self.assertEqual(result["error"], 0)
+        self.assertEqual(result["results"][0]["account"], account)
+        self.assertEqual(result["results"][0]["status"], "alive")
 
 if __name__ == "__main__":
     unittest.main()

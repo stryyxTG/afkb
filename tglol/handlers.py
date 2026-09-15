@@ -462,39 +462,68 @@ def format_valid_check_progress(
 
 async def run_accounts_valid_check(config: Config, accounts: list, *, progress_cb=None) -> dict[str, Any]:
     semaphore = asyncio.Semaphore(SCAN_CONCURRENCY)
-    results: list[dict[str, Any]] = []
-    total = len(accounts)
+    total_accounts = len(accounts)
+    total_attempts = total_accounts
+    checked_attempts = 0
+    results_by_id: dict[int, dict[str, Any]] = {}
+    order: list[int] = []
 
-    async def worker(account) -> None:
+    def current_results() -> list[dict[str, Any]]:
+        return [results_by_id[account_id] for account_id in order]
+
+    async def report_progress() -> None:
+        if not progress_cb:
+            return
+        counts = _scan_status_counts(current_results())
+        await progress_cb(
+            checked=checked_attempts,
+            total=total_attempts,
+            alive=counts["alive"],
+            dead=counts["dead"],
+            frozen=counts["frozen"],
+            need_2fa=counts["need_2fa"],
+            error=counts["error"],
+            skipped=counts["skipped"],
+        )
+
+    async def worker(account, *, attempt: int) -> None:
+        nonlocal checked_attempts
         async with semaphore:
             result = await check_account_validity(account, config)
-            results.append(result)
-            counts = _scan_status_counts(results)
+            account_id = int(getattr(account, "id", len(order)))
+            if account_id not in results_by_id:
+                order.append(account_id)
+            results_by_id[account_id] = result
+            checked_attempts += 1
             logger.info(
-                "Scan account result id=%s phone=%s status=%s account_status=%s reason=%s",
+                "Scan account result attempt=%s id=%s phone=%s status=%s account_status=%s reason=%s",
+                attempt,
                 getattr(account, "id", None),
                 getattr(account, "phone", None),
                 result["status"],
                 result["account_status"],
                 result["reason"],
             )
-            if progress_cb:
-                await progress_cb(
-                    checked=len(results),
-                    total=total,
-                    alive=counts["alive"],
-                    dead=counts["dead"],
-                    frozen=counts["frozen"],
-                    need_2fa=counts["need_2fa"],
-                    error=counts["error"],
-                    skipped=counts["skipped"],
-                )
+            await report_progress()
 
-    await asyncio.gather(*(worker(account) for account in accounts))
+    await asyncio.gather(*(worker(account, attempt=1) for account in accounts))
+
+    retry_accounts = [
+        item["account"]
+        for item in current_results()
+        if item["status"] != "alive"
+    ]
+    if retry_accounts:
+        total_attempts += len(retry_accounts)
+        logger.info("Retrying failed scan accounts count=%s", len(retry_accounts))
+        await asyncio.gather(*(worker(account, attempt=2) for account in retry_accounts))
+
+    results = current_results()
     counts = _scan_status_counts(results)
     return {
-        "total": total,
+        "total": total_accounts,
         "checked": len(results),
+        "attempts": checked_attempts,
         "alive": [item["account"] for item in results if item["status"] == "alive"],
         "dead": [item["account"] for item in results if item["status"] == "dead"],
         "frozen": [item["account"] for item in results if item["status"] == "frozen"],
@@ -504,7 +533,6 @@ async def run_accounts_valid_check(config: Config, accounts: list, *, progress_c
         "results": results,
         **counts,
     }
-
 def _account_file_paths(account) -> list[Path]:
     paths: list[Path] = []
     for raw in (account.session_path, account.json_original_path, account.json_effective_path):
