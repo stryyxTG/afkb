@@ -814,7 +814,6 @@ async def _watch_requested_account_codes(
                     continue
                 if not current or not code_message:
                     continue
-                code_received_ids.add(account.id)
                 pending_ids.discard(account.id)
                 try:
                     await _send_code_delivery(
@@ -825,6 +824,7 @@ async def _watch_requested_account_codes(
                         requester_user_id=requester_user_id,
                         reply_to_message_id=reply_to_message_id,
                     )
+                    code_received_ids.add(account.id)
                 except Exception as exc:
                     logger.warning("Cannot send Telegram code for account %s: %s", account.id, exc)
             if pending_ids and time.monotonic() < deadline:
