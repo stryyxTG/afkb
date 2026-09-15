@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 import telethon
-from telethon import TelegramClient, functions
+from telethon import TelegramClient, functions, types
 from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, RPCError, SessionPasswordNeededError, UserDeactivatedBanError, UserDeactivatedError
 from telethon.tl.types import User
 
@@ -163,14 +163,68 @@ async def sign_in_password(
         await client.disconnect()
 
 
+def _decode_telegram_json(value: Any) -> Any:
+    if isinstance(value, types.JsonObject):
+        return {item.key: _decode_telegram_json(item.value) for item in value.value}
+    if isinstance(value, types.JsonArray):
+        return [_decode_telegram_json(item) for item in value.value]
+    if isinstance(value, (types.JsonString, types.JsonNumber, types.JsonBool)):
+        return value.value
+    if isinstance(value, types.JsonNull):
+        return None
+    return value
+
+
+def _frozen_result(reason: str, **extra: Any) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "frozen",
+        "reason": reason,
+        **extra,
+    }
+
+
+async def check_account_app_config_freeze(client: TelegramClient) -> dict[str, Any]:
+    try:
+        result = await client(functions.help.GetAppConfigRequest(hash=0))
+    except Exception as exc:
+        return _telegram_valid_check_error_result(exc)
+
+    if isinstance(result, types.help.AppConfigNotModified):
+        return {"ok": True, "status": "unknown", "reason": "app_config_not_modified"}
+
+    config = _decode_telegram_json(getattr(result, "config", None))
+    if not isinstance(config, dict):
+        return {"ok": True, "status": "unknown", "reason": "app_config_empty"}
+
+    frozen_since = config.get("freeze_since_date") or 0
+    if frozen_since:
+        return _frozen_result(
+            "app_config_freeze",
+            freeze_since=frozen_since,
+            freeze_until=config.get("freeze_until_date"),
+            appeal_url=config.get("freeze_appeal_url"),
+        )
+
+    return {"ok": True, "status": "active", "reason": "app_config_active"}
+
+
 def _telegram_valid_check_error_result(exc: Exception) -> dict[str, Any]:
-    if isinstance(exc, (UserDeactivatedBanError, UserDeactivatedError)):
-        reason = "user_deactivated_ban" if isinstance(exc, UserDeactivatedBanError) else "user_deactivated"
+    message = str(getattr(exc, "message", "") or str(exc) or "")
+    if message in {"FROZEN_METHOD_INVALID", "FROZEN_PARTICIPANT_MISSING"}:
+        return _frozen_result(message.lower(), rpc_error=message)
+    if message in {"AUTH_KEY_UNREGISTERED", "SESSION_REVOKED"}:
         return {
             "ok": False,
-            "status": "frozen",
-            "reason": reason,
+            "status": "dead",
+            "reason": message.lower(),
         }
+    if message in {"USER_DEACTIVATED", "USER_DEACTIVATED_BAN"}:
+        reason = "user_deactivated_ban" if message == "USER_DEACTIVATED_BAN" else "user_deactivated"
+        return _frozen_result(reason, rpc_error=message)
+    if isinstance(exc, (UserDeactivatedBanError, UserDeactivatedError)):
+        reason = "user_deactivated_ban" if isinstance(exc, UserDeactivatedBanError) else "user_deactivated"
+        return _frozen_result(reason)
     if isinstance(exc, AuthKeyUnregisteredError):
         return {
             "ok": False,
@@ -213,19 +267,13 @@ async def check_account_freeze(client: TelegramClient) -> dict[str, Any]:
             }
 
         if getattr(me, "deleted", False):
-            return {
-                "ok": False,
-                "status": "frozen",
-                "reason": "user_deleted_flag",
-                "user": me,
-            }
+            return _frozen_result("user_deleted_flag", user=me)
         if getattr(me, "restricted", False) or getattr(me, "restriction_reason", None):
-            return {
-                "ok": False,
-                "status": "frozen",
-                "reason": "user_restricted_flag",
-                "user": me,
-            }
+            return _frozen_result("user_restricted_flag", user=me)
+
+        app_config_result = await check_account_app_config_freeze(client)
+        if app_config_result["status"] == "frozen":
+            return {**app_config_result, "user": me}
 
         await client.get_dialogs(limit=1)
         await client(functions.updates.GetStateRequest())

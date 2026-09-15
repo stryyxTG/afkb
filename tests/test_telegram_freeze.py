@@ -3,9 +3,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, SessionPasswordNeededError, UserDeactivatedBanError, UserDeactivatedError
+from telethon import types
+from telethon.errors import AuthKeyUnregisteredError, FloodWaitError, RPCError, SessionPasswordNeededError, UserDeactivatedBanError, UserDeactivatedError
 
-from tglol.telegram_service import check_account_freeze, inspect_session_with_freeze_check
+from tglol.telegram_service import check_account_app_config_freeze, check_account_freeze, inspect_session_with_freeze_check
 
 
 class TelegramFreezeInspectTests(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +94,38 @@ class TelegramFreezeInspectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "frozen")
         self.assertEqual(result["reason"], "user_restricted_flag")
         client.get_dialogs.assert_not_called()
+
+
+    async def test_app_config_freeze_since_is_frozen(self):
+        client = AsyncMock()
+        client.return_value = types.help.AppConfig(
+            hash=1,
+            config=types.JsonObject([
+                types.JsonObjectValue("freeze_since_date", types.JsonNumber(1789000000)),
+                types.JsonObjectValue("freeze_until_date", types.JsonNumber(1789600000)),
+                types.JsonObjectValue("freeze_appeal_url", types.JsonString("https://example.test/appeal")),
+            ]),
+        )
+
+        result = await check_account_app_config_freeze(client)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "frozen")
+        self.assertEqual(result["reason"], "app_config_freeze")
+        self.assertEqual(result["freeze_since"], 1789000000)
+        self.assertEqual(result["freeze_until"], 1789600000)
+        self.assertEqual(result["appeal_url"], "https://example.test/appeal")
+
+    async def test_frozen_rpc_message_is_frozen(self):
+        client = AsyncMock()
+        client.side_effect = RPCError(None, "FROZEN_METHOD_INVALID")
+
+        result = await check_account_app_config_freeze(client)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "frozen")
+        self.assertEqual(result["reason"], "frozen_method_invalid")
+        self.assertEqual(result["rpc_error"], "FROZEN_METHOD_INVALID")
 
 if __name__ == "__main__":
     unittest.main()
