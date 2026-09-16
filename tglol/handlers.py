@@ -683,20 +683,26 @@ async def _send_code_delivery(
         ]
     )
     last_error: Exception | None = None
-    for attempt in range(3):
-        try:
-            await bot.send_message(
-                chat_id,
-                "\n".join(lines),
-                reply_to_message_id=reply_to_message_id,
-                parse_mode="HTML",
-                reply_markup=markup,
-            )
-            return
-        except Exception as exc:
-            last_error = exc
-            if attempt < 2:
-                await asyncio.sleep(1 + attempt)
+    reply_variants = [reply_to_message_id]
+    if reply_to_message_id is not None:
+        reply_variants.append(None)
+    for reply_id in reply_variants:
+        for attempt in range(3):
+            try:
+                await bot.send_message(
+                    chat_id,
+                    "\n".join(lines),
+                    reply_to_message_id=reply_id,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(1 + attempt)
+        if reply_id is not None:
+            logger.info("Code delivery with reply failed for account %s, retrying without reply: %s", account.id, last_error)
     if last_error:
         raise last_error
 
@@ -744,8 +750,8 @@ async def _poll_new_telegram_code_message(
     for code_message in messages:
         if code_message.key in seen:
             continue
-        seen.add(code_message.key)
         if not _code_message_is_new(code_message, started_at):
+            seen.add(code_message.key)
             continue
         return current, code_message, False
     return current, None, False
@@ -843,7 +849,6 @@ async def _watch_requested_account_codes(
                     continue
                 if not current or not code_message:
                     continue
-                pending_ids.discard(account.id)
                 try:
                     await _send_code_delivery(
                         bot,
@@ -853,6 +858,8 @@ async def _watch_requested_account_codes(
                         requester_user_id=requester_user_id,
                         reply_to_message_id=reply_to_message_id,
                     )
+                    seen_keys.setdefault(account.id, set()).add(code_message.key)
+                    pending_ids.discard(account.id)
                     code_received_ids.add(account.id)
                 except Exception as exc:
                     logger.warning("Cannot send Telegram code for account %s: %s", account.id, exc)

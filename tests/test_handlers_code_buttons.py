@@ -15,6 +15,16 @@ class FakeBot:
         self.calls.append((args, kwargs))
 
 
+
+class ReplyFailBot:
+    def __init__(self):
+        self.calls = []
+
+    async def send_message(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if kwargs.get("reply_to_message_id") is not None:
+            raise RuntimeError("reply target not found")
+
 class CodeButtonTests(unittest.IsolatedAsyncioTestCase):
     async def test_retry_button_is_short_and_keeps_original_reply(self):
         bot = FakeBot()
@@ -45,6 +55,30 @@ class CodeButtonTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+
+
+    async def test_code_delivery_falls_back_without_reply(self):
+        bot = ReplyFailBot()
+        account = SimpleNamespace(
+            id=1234567890,
+            phone="+12536173293",
+            twofa_password=None,
+            json_original_path=None,
+            json_effective_path=None,
+        )
+
+        await _send_code_delivery(
+            bot,
+            chat_id=-1001234567890123,
+            account=account,
+            code="89621",
+            requester_user_id=1234567890123,
+            reply_to_message_id=987654321,
+        )
+
+        self.assertGreaterEqual(len(bot.calls), 2)
+        self.assertEqual(bot.calls[-1][1]["reply_to_message_id"], None)
+        self.assertIn("89621", bot.calls[-1][0][1])
 
     async def test_code_delivery_includes_twofa_from_json(self):
         bot = FakeBot()
