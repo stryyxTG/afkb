@@ -1,14 +1,18 @@
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from tglol.config import Config
 from tglol.db import add_account, claim_accounts_for_worker, get_account, init_db
-from tglol.handlers import _finalize_requested_account_stages
+from tglol.handlers import _finalize_requested_account_stages, _watch_requested_account_codes
+from tglol.telegram_service import TelegramCodeMessage
 
 
-class TriggerCodeFinalizeTests(unittest.TestCase):
+class TriggerCodeFinalizeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmpdir = Path(tempfile.mkdtemp())
         self.config = Config(
@@ -100,6 +104,39 @@ class TriggerCodeFinalizeTests(unittest.TestCase):
         self.assertEqual(account.registration_services, "imo,bebe")
         self.assertEqual(account.registration_service, "imo")
 
+
+
+    async def test_watcher_moves_entire_request_to_issued_after_first_delivered_code(self):
+        first_id = self.add_account("70001")
+        second_id = self.add_account("70002")
+        claimed = self.claim_processing(first_id, second_id)
+        first, second = claimed
+        delivered = []
+
+        async def fake_poll(config, account, *, started_at, seen_keys=None):
+            if account.id == first.id:
+                return account, TelegramCodeMessage(code="12345", key="telegram:1:0", date=started_at), False
+            return account, None, True
+
+        async def fake_send(*args, **kwargs):
+            delivered.append(kwargs["account"].id)
+
+        with patch("tglol.handlers._poll_new_telegram_code_message", side_effect=fake_poll), patch(
+            "tglol.handlers._send_code_delivery", side_effect=fake_send
+        ):
+            await _watch_requested_account_codes(
+                SimpleNamespace(),
+                self.config,
+                claimed,
+                chat_id=-100123,
+                requester_user_id=1,
+                reply_to_message_id=10,
+                started_at=datetime.now(timezone.utc),
+            )
+
+        self.assertEqual(delivered, [first_id])
+        self.assertEqual(get_account(self.config, first_id).account_stage, "issued")
+        self.assertEqual(get_account(self.config, second_id).account_stage, "issued")
 
 if __name__ == "__main__":
     unittest.main()

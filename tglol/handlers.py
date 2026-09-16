@@ -817,8 +817,10 @@ async def _watch_requested_account_codes(
 ) -> None:
     seen_keys: dict[int, set[str]] = {account.id: set() for account in accounts}
     pending_ids = {account.id for account in accounts}
+    code_received_ids: set[int] = set()
     poll_semaphore = asyncio.Semaphore(CODE_WATCH_MAX_CONCURRENT_POLLS)
     deadline = time.monotonic() + CODE_WATCH_SECONDS
+    stages_finalized_after_delivery = False
 
     async def poll_account(account):
         async with poll_semaphore:
@@ -861,6 +863,15 @@ async def _watch_requested_account_codes(
                     seen_keys.setdefault(account.id, set()).add(code_message.key)
                     pending_ids.discard(account.id)
                     code_received_ids.add(account.id)
+                    if not stages_finalized_after_delivery:
+                        stage_result = _finalize_requested_account_stages(config, accounts, code_received_ids)
+                        stages_finalized_after_delivery = True
+                        logger.info(
+                            "Code watcher immediately finalized requested accounts after delivery: issued=%s restored=%s skipped=%s",
+                            stage_result["issued"],
+                            stage_result["restored"],
+                            stage_result["skipped"],
+                        )
                 except Exception as exc:
                     logger.warning("Cannot send Telegram code for account %s: %s", account.id, exc)
             if pending_ids and time.monotonic() < deadline:
