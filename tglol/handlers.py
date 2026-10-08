@@ -46,6 +46,7 @@ from tglol.keyboards import (
     account_detail_menu,
     accounts_menu,
     proxy_menu,
+    trigger_menu,
     accounts_page_keyboard,
     add_account_menu,
     common_storage_sections_menu,
@@ -68,7 +69,7 @@ from tglol.registration import (
     services_from_storage,
     services_label,
 )
-from tglol.states import AddByCode, AddByZip, ProxyState
+from tglol.states import AddByCode, AddByZip, ProxyState, TriggerState
 from tglol.telegram_service import (
     get_latest_telegram_code,
     get_recent_telegram_codes,
@@ -177,6 +178,16 @@ def _set_config_proxy(config: Config, value: str | None) -> None:
     _write_env_value("TELEGRAM_PROXY", cleaned)
     object.__setattr__(config, "telegram_proxy", cleaned)
 
+def _set_config_trigger_chat(config: Config, chat_id: int | None) -> None:
+    _write_env_value("TRIGGER_CHAT_ID", str(chat_id) if chat_id is not None else None)
+    object.__setattr__(config, "trigger_chat_id", chat_id)
+
+
+def _trigger_menu_text(config: Config) -> str:
+    if config.trigger_chat_id is None:
+        return "???????\n??? ?? ????????."
+    return f"???????\n??????? ???: <code>{config.trigger_chat_id}</code>"
+
 def _pages(total: int) -> int:
     return max(1, ceil(total / ACCOUNTS_PER_PAGE))
 
@@ -252,6 +263,14 @@ def _parse_telegram_user_id(raw: str) -> int | None:
         return None
     value = int(raw)
     return value if 1 <= value <= 9_223_372_036_854_775_807 else None
+
+def _parse_telegram_chat_id(raw: str) -> int | None:
+    raw = (raw or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if -9_223_372_036_854_775_808 <= value <= 9_223_372_036_854_775_807 and value != 0 else None
 
 
 async def _resolve_worker_identity(bot: Bot, config: Config, user_id: int) -> tuple[str, str | None, str | None]:
@@ -1411,6 +1430,50 @@ async def delete_proxy(callback: CallbackQuery, state: FSMContext, config: Confi
     _set_config_proxy(config, None)
     await callback.message.edit_text(_proxy_menu_text(config), reply_markup=proxy_menu(has_proxy=False))
     await callback.answer("\u041f\u0440\u043e\u043a\u0441\u0438 \u0443\u0434\u0430\u043b\u0451\u043d.")
+
+@router.callback_query(F.data == "trigger:menu")
+async def show_trigger_menu(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    await state.clear()
+    await callback.message.edit_text(
+        _trigger_menu_text(config),
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "trigger:set")
+async def ask_trigger_chat(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    await state.set_state(TriggerState.waiting_chat_id)
+    await callback.message.edit_text(
+        "??????? ???????? ID ???? ??? ????????. ??? ????? ?? ?????? ?????????? ? <code>-100</code>.",
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None),
+    )
+    await callback.answer()
+
+
+@router.message(TriggerState.waiting_chat_id)
+async def save_trigger_chat(message: Message, state: FSMContext, config: Config) -> None:
+    chat_id = _parse_telegram_chat_id(message.text or "")
+    if chat_id is None:
+        await message.answer("????? ???????? ID ????, ???????? <code>-1001234567890</code>, ??? /cancel.")
+        return
+    _set_config_trigger_chat(config, chat_id)
+    await state.clear()
+    await message.answer(
+        f"???-??????? ????????: <code>{chat_id}</code>.",
+        reply_markup=trigger_menu(has_trigger=True),
+    )
+
+
+@router.callback_query(F.data == "trigger:clear")
+async def clear_trigger_chat(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    await state.clear()
+    _set_config_trigger_chat(config, None)
+    await callback.message.edit_text(
+        _trigger_menu_text(config), reply_markup=trigger_menu(has_trigger=False)
+    )
+    await callback.answer("??????? ????????.")
+
 
 @router.callback_query(F.data == "accounts:add")
 async def show_add_account_menu(callback: CallbackQuery, state: FSMContext) -> None:

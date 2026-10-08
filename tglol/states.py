@@ -25,3 +25,6 @@ class ChangeWorkerLimit(StatesGroup):
 
 class ProxyState(StatesGroup):
     waiting_proxy = State()
+
+class TriggerState(StatesGroup):
+    waiting_chat_id = State()

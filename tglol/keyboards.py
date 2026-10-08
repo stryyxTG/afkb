@@ -30,6 +30,7 @@ def accounts_menu() -> InlineKeyboardMarkup:
     builder.button(text="Воркеры", callback_data="workers:menu")
     builder.button(text="Администраторы", callback_data="admins:menu")
     builder.button(text="\u041f\u0440\u043e\u043a\u0441\u0438", callback_data="proxy:menu")
+    builder.button(text="Настройка триггера", callback_data="trigger:menu")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -44,6 +45,15 @@ def proxy_menu(*, has_proxy: bool) -> InlineKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup()
 
+
+def trigger_menu(*, has_trigger: bool) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Изменить чат", callback_data="trigger:set")
+    if has_trigger:
+        builder.button(text="Отключить триггер", callback_data="trigger:clear")
+    builder.button(text="Назад", callback_data="accounts:menu")
+    builder.adjust(1)
+    return builder.as_markup()
 
 def add_account_menu() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
