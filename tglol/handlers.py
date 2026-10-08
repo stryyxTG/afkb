@@ -183,10 +183,17 @@ def _set_config_trigger_chat(config: Config, chat_id: int | None) -> None:
     object.__setattr__(config, "trigger_chat_id", chat_id)
 
 
+def _set_config_trigger_word(config: Config, word: str) -> None:
+    cleaned = word.strip()
+    _write_env_value("TRIGGER_WORD", cleaned)
+    object.__setattr__(config, "trigger_word", cleaned)
+
+
 def _trigger_menu_text(config: Config) -> str:
-    if config.trigger_chat_id is None:
-        return "Триггер\nЧат не настроен."
-    return f"Триггер\nТекущий чат: <code>{config.trigger_chat_id}</code>"
+    chat_text = "Чат не настроен." if config.trigger_chat_id is None else (
+        f"Текущий чат: <code>{config.trigger_chat_id}</code>"
+    )
+    return f"Триггер\n{chat_text}\nСлово: <code>{escape(config.trigger_word)}</code>"
 
 def _pages(total: int) -> int:
     return max(1, ceil(total / ACCOUNTS_PER_PAGE))
@@ -905,28 +912,33 @@ async def _watch_requested_account_codes(
             stage_result["restored"],
             stage_result["skipped"],
         )
-def _parse_trigger_request_count(text: str) -> int:
-    text = (text or "").strip().lower()
+def _contains_trigger_word(text: str, trigger_word: str) -> bool:
+    word = (trigger_word or "").strip()
+    if not word:
+        return False
+    return bool(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text or "", flags=re.IGNORECASE))
+
+
+def _parse_trigger_request_count(text: str, trigger_word: str = "\u0442\u0433") -> int:
+    word = (trigger_word or "").strip()
+    if not word:
+        return 1
+    escaped_word = re.escape(word)
     patterns = (
-        r"\bтг\b\s*(\d+)",
-        r"(\d+)\s*\bтг\b",
+        rf"(?<!\w){escaped_word}(?!\w)\s*(\d+)",
+        rf"(\d+)\s*(?<!\w){escaped_word}(?!\w)",
     )
     for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
+        match = re.search(pattern, text or "", flags=re.IGNORECASE)
         if match:
             return max(1, min(int(match.group(1)), 10))
     return 1
 
 
 def _is_trigger_message(message: Message, config: Config) -> bool:
-    if not config.trigger_chat_id:
+    if not config.trigger_chat_id or message.chat.id != config.trigger_chat_id:
         return False
-    if message.chat.id != config.trigger_chat_id:
-        return False
-    text = (message.text or "").strip()
-    if not text:
-        return False
-    return bool(re.search(r"\bтг\b", text, flags=re.IGNORECASE))
+    return _contains_trigger_word((message.text or "").strip(), config.trigger_word)
 
 
 async def _notify_owners(bot: Bot, config: Config, *, reason: str, account_phone: str | None, requester_chat_id: int | None, requester_user_id: int | None) -> None:
@@ -948,7 +960,7 @@ async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None
     requester_id = message.from_user.id if message.from_user else 0
     if requester_id not in config.admin_ids and get_worker(config, requester_id) is None:
         return
-    requested = _parse_trigger_request_count(message.text or "")
+    requested = _parse_trigger_request_count(message.text or "", config.trigger_word)
     worker_request_id = record_worker_request(config, requester_id, requested)
     requested_count = requested
 
@@ -1449,6 +1461,30 @@ async def ask_trigger_chat(callback: CallbackQuery, state: FSMContext, config: C
         reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None),
     )
     await callback.answer()
+
+
+@router.callback_query(F.data == "trigger:word")
+async def ask_trigger_word(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    await state.set_state(TriggerState.waiting_word)
+    await callback.message.edit_text(
+        "Отправь одно триггерное слово длиной до 32 символов без пробелов.",
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None),
+    )
+    await callback.answer()
+
+
+@router.message(TriggerState.waiting_word)
+async def save_trigger_word(message: Message, state: FSMContext, config: Config) -> None:
+    word = (message.text or "").strip()
+    if not word or len(word) > 32 or any(char.isspace() for char in word):
+        await message.answer("Нужно одно непустое слово длиной до 32 символов без пробелов, или /cancel.")
+        return
+    _set_config_trigger_word(config, word)
+    await state.clear()
+    await message.answer(
+        f"Триггерное слово сохранено: <code>{escape(word)}</code>.",
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None),
+    )
 
 
 @router.message(TriggerState.waiting_chat_id)

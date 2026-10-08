@@ -28,3 +28,4 @@ class ProxyState(StatesGroup):
 
 class TriggerState(StatesGroup):
     waiting_chat_id = State()
+    waiting_word = State()

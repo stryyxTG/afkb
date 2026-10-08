@@ -49,6 +49,7 @@ def proxy_menu(*, has_proxy: bool) -> InlineKeyboardMarkup:
 def trigger_menu(*, has_trigger: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Изменить чат", callback_data="trigger:set")
+    builder.button(text="Изменить слово", callback_data="trigger:word")
     if has_trigger:
         builder.button(text="Отключить триггер", callback_data="trigger:clear")
     builder.button(text="Назад", callback_data="accounts:menu")
