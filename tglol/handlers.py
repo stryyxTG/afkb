@@ -185,8 +185,8 @@ def _set_config_trigger_chat(config: Config, chat_id: int | None) -> None:
 
 def _trigger_menu_text(config: Config) -> str:
     if config.trigger_chat_id is None:
-        return "???????\n??? ?? ????????."
-    return f"???????\n??????? ???: <code>{config.trigger_chat_id}</code>"
+        return "Триггер\nЧат не настроен."
+    return f"Триггер\nТекущий чат: <code>{config.trigger_chat_id}</code>"
 
 def _pages(total: int) -> int:
     return max(1, ceil(total / ACCOUNTS_PER_PAGE))
@@ -1445,7 +1445,7 @@ async def show_trigger_menu(callback: CallbackQuery, state: FSMContext, config: 
 async def ask_trigger_chat(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
     await state.set_state(TriggerState.waiting_chat_id)
     await callback.message.edit_text(
-        "??????? ???????? ID ???? ??? ????????. ??? ????? ?? ?????? ?????????? ? <code>-100</code>.",
+        "Отправь числовой ID чата для триггера. Для групп он обычно начинается с <code>-100</code>.",
         reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None),
     )
     await callback.answer()
@@ -1455,12 +1455,12 @@ async def ask_trigger_chat(callback: CallbackQuery, state: FSMContext, config: C
 async def save_trigger_chat(message: Message, state: FSMContext, config: Config) -> None:
     chat_id = _parse_telegram_chat_id(message.text or "")
     if chat_id is None:
-        await message.answer("????? ???????? ID ????, ???????? <code>-1001234567890</code>, ??? /cancel.")
+        await message.answer("Нужен числовой ID чата, например <code>-1001234567890</code>, или /cancel.")
         return
     _set_config_trigger_chat(config, chat_id)
     await state.clear()
     await message.answer(
-        f"???-??????? ????????: <code>{chat_id}</code>.",
+        f"Чат-триггер сохранён: <code>{chat_id}</code>.",
         reply_markup=trigger_menu(has_trigger=True),
     )
 
@@ -1472,7 +1472,7 @@ async def clear_trigger_chat(callback: CallbackQuery, state: FSMContext, config:
     await callback.message.edit_text(
         _trigger_menu_text(config), reply_markup=trigger_menu(has_trigger=False)
     )
-    await callback.answer("??????? ????????.")
+    await callback.answer("Триггер отключён.")
 
 
 @router.callback_query(F.data == "accounts:add")
