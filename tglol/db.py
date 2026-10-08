@@ -31,6 +31,26 @@ CREATE TABLE IF NOT EXISTS accounts (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS workers (
+    user_id INTEGER PRIMARY KEY,
+    first_name TEXT NOT NULL,
+    last_name TEXT,
+    username TEXT,
+    remaining_limit INTEGER NOT NULL DEFAULT 0,
+    configured_limit INTEGER NOT NULL DEFAULT 0,
+    created_by INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS worker_activity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    worker_id INTEGER NOT NULL,
+    requested_count INTEGER NOT NULL,
+    delivered_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS worker_activity_user ON worker_activity(worker_id);
+
 """
 
 
@@ -97,7 +117,13 @@ def connect(config: Config) -> sqlite3.Connection:
 
 def init_db(config: Config) -> None:
     with connect(config) as connection:
+        _migrate_legacy_workers_table(connection)
         connection.executescript(SCHEMA)
+        # A restart cancels in-memory code watchers, so their reservations must not persist.
+        connection.execute(
+            "UPDATE accounts SET account_stage = 'nereg', registration_service = NULL, "
+            "registration_services = NULL WHERE account_stage = 'processing'"
+        )
         _ensure_column(connection, "accounts", "account_stage", "TEXT NOT NULL DEFAULT 'nereg'")
         _ensure_column(connection, "accounts", "registration_service", "TEXT")
         _ensure_column(connection, "accounts", "registration_services", "TEXT")
@@ -176,7 +202,8 @@ def _account_from_row(row: sqlite3.Row) -> Account:
 
 
 def _worker_from_row(row: sqlite3.Row) -> Worker:
-    return Worker(**dict(row))
+    values = dict(row)
+    return Worker(**{field.name: values.get(field.name) for field in fields(Worker)})
 
 
 def get_worker(config: Config, user_id: int) -> Worker | None:
@@ -655,3 +682,46 @@ def delete_accounts_by_stage(
             params,
         )
         return int(cursor.rowcount or 0)
+
+
+def record_worker_request(config: Config, user_id: int, requested_count: int) -> int | None:
+    """Record one accepted trigger, including requests when the stock is empty."""
+    with connect(config) as connection:
+        cursor = connection.execute(
+            "INSERT INTO worker_activity (worker_id, requested_count) "
+            "SELECT user_id, ? FROM workers WHERE user_id = ?",
+            (requested_count, user_id),
+        )
+        return int(cursor.lastrowid) if cursor.rowcount else None
+
+
+def record_worker_delivery(config: Config, request_id: int) -> None:
+    # Reset deletes requests; a late completion cannot recreate old statistics.
+    with connect(config) as connection:
+        connection.execute(
+            "UPDATE worker_activity SET delivered_count = delivered_count + 1 WHERE id = ?",
+            (request_id,),
+        )
+
+
+def worker_activity_stats(config: Config) -> dict[int, dict[str, int]]:
+    with connect(config) as connection:
+        rows = connection.execute(
+            "SELECT worker_id, COUNT(*) AS requests, SUM(requested_count) AS requested, "
+            "SUM(delivered_count) AS delivered FROM worker_activity GROUP BY worker_id"
+        ).fetchall()
+    return {row['worker_id']: dict(row) for row in rows}
+
+
+def clear_worker_activity(config: Config, user_id: int | None = None) -> None:
+    with connect(config) as connection:
+        if user_id is None:
+            connection.execute("DELETE FROM worker_activity")
+        else:
+            connection.execute("DELETE FROM worker_activity WHERE worker_id = ?", (user_id,))
+
+
+def revoke_worker_access(config: Config, user_id: int) -> None:
+    with connect(config) as connection:
+        connection.execute("DELETE FROM worker_activity WHERE worker_id = ?", (user_id,))
+        connection.execute("DELETE FROM workers WHERE user_id = ?", (user_id,))

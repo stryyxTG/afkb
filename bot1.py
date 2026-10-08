@@ -7,6 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 from tglol.config import load_config
 from tglol.db import init_db
 from tglol.handlers import router
+from tglol.worker_admin import router as worker_router
 from tglol.paths import ensure_storage
 
 
@@ -21,6 +22,7 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=config.bot_parse_mode),
     )
     dp = Dispatcher()
+    dp.include_router(worker_router)
     dp.include_router(router)
 
     await dp.start_polling(bot, config=config)

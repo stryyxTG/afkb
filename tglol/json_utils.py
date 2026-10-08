@@ -66,8 +66,10 @@ def runtime_from_json(data: dict[str, Any]) -> dict[str, Any]:
         "device": pick_str(data, "device_model", "device") or "Desktop",
         "sdk": pick_str(data, "system_version", "sdk", "SDK") or "Windows 11",
         "app_version": pick_str(data, "app_version") or "6.9.3 x64",
-        "lang_code": "en",
-        "system_lang_code": "en-US",
+        "lang_code": pick_str(data, "lang_code", "language_code") or "en",
+        "system_lang_code": pick_str(
+            data, "system_lang_code", "system_language_code"
+        ) or "en-US",
         "lang_pack": pick_str(data, "lang_pack") or "tdesktop",
     }
     for key in ("proxy", "proxy_url", "proxy_string", "proxy_settings"):

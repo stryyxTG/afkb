@@ -1,8 +1,10 @@
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from tglol.config import Config
 from tglol.json_utils import pick_api, runtime_from_json
+from tglol.telegram_service import client_for
 
 
 class JsonUtilsTests(unittest.TestCase):
@@ -43,7 +45,7 @@ class JsonUtilsTests(unittest.TestCase):
         self.assertEqual(pick_api({"api_id": 8, "api_hash": "api_hash"}, self.config()), (8, "api_hash"))
         self.assertEqual(pick_api({"app_id": "", "app_hash": ""}, self.config()), (2040, "config_hash"))
 
-    def test_runtime_uses_json_device_but_forces_safe_language(self):
+    def test_runtime_uses_json_connection_profile(self):
         runtime = runtime_from_json(
             {
                 "device_model": "Pixel 8",
@@ -59,10 +61,37 @@ class JsonUtilsTests(unittest.TestCase):
         self.assertEqual(runtime["device"], "Pixel 8")
         self.assertEqual(runtime["sdk"], "Android 15")
         self.assertEqual(runtime["app_version"], "12.8.3 (69799)")
-        self.assertEqual(runtime["lang_code"], "en")
-        self.assertEqual(runtime["system_lang_code"], "en-US")
+        self.assertEqual(runtime["lang_code"], "ru")
+        self.assertEqual(runtime["system_lang_code"], "ru-ru")
         self.assertEqual(runtime["lang_pack"], "android")
 
+    def test_client_uses_api_and_runtime_values_from_json(self):
+        data = {
+            "api_id": 8,
+            "api_hash": "api_hash_8",
+            "device_model": "Pixel 8",
+            "system_version": "Android 15",
+            "app_version": "12.8.3",
+            "language_code": "ru",
+            "system_language_code": "ru-RU",
+            "proxy": [2, "proxy.example", 1080, True, "user", "pass"],
+        }
+        api_id, api_hash = pick_api(data, self.config())
+        runtime = runtime_from_json(data)
+        with patch("tglol.telegram_service.TelegramClient") as client, patch(
+            "tglol.telegram_service.telethon_compatible_session_path",
+            return_value=Path("account.session"),
+        ):
+            client_for(Path("account.session"), api_id, api_hash, runtime)
+
+        args, kwargs = client.call_args
+        self.assertEqual(args[1:], (8, "api_hash_8"))
+        self.assertEqual(kwargs["device_model"], "Pixel 8")
+        self.assertEqual(kwargs["system_version"], "Android 15")
+        self.assertEqual(kwargs["app_version"], "12.8.3")
+        self.assertEqual(kwargs["lang_code"], "ru")
+        self.assertEqual(kwargs["system_lang_code"], "ru-RU")
+        self.assertEqual(kwargs["proxy"][1:3], ("proxy.example", 1080))
     def test_runtime_defaults_match_import_client_defaults(self):
         runtime = runtime_from_json({})
         self.assertEqual(runtime["device"], "Desktop")

@@ -83,3 +83,14 @@ sudo systemctl restart tgbot
 - `.env`, `storage/`, sessions, JSON files and the SQLite DB must stay only on the server.
 - Proxy can be set from the bot menu or by `TELEGRAM_PROXY` in `.env`.
 - For imported accounts, `.session` and `.json` must have matching base names.
+## Workers and statistics
+
+Admins can open **Воркеры** from the main menu or use `/workers` to add a worker by numeric Telegram ID, view their username, and revoke access. If Telegram cannot resolve the username immediately, it is updated from the worker's next accepted trigger/button interaction. Workers without a username are shown by name and ID.
+
+Only listed workers and bot admins may request accounts in `TRIGGER_CHAT_ID`. Workers do not have access to the admin menu. There are no per-worker quotas; each trigger requests at most 10 accounts.
+
+`/stats` shows the number of requests, requested accounts, and accounts whose code was successfully sent. Empty-stock requests count too. Only workers in the list are included in these statistics; admins can request accounts without being added. Repeat-code buttons do not count as a new account request or issuance.
+
+Statistics can be reset for one worker or everyone (also via `/reset`), with confirmation. Reset preserves access and accounts; pending requests from before the reset do not repopulate the cleared statistics. Revoking a worker removes their statistics. Data is stored in SQLite and survives restarts.
+
+In a batch, each account moves to `issued` only after its code is delivered. Accounts still awaiting a code stay reserved; those without a delivered code return to their original stage when the watcher finishes (normally after 10 minutes).

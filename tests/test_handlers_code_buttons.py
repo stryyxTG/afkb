@@ -57,7 +57,7 @@ class CodeButtonTests(unittest.IsolatedAsyncioTestCase):
 
 
 
-    async def test_code_delivery_falls_back_without_reply(self):
+    async def test_code_delivery_never_falls_back_outside_original_reply(self):
         bot = ReplyFailBot()
         account = SimpleNamespace(
             id=1234567890,
@@ -67,18 +67,18 @@ class CodeButtonTests(unittest.IsolatedAsyncioTestCase):
             json_effective_path=None,
         )
 
-        await _send_code_delivery(
-            bot,
-            chat_id=-1001234567890123,
-            account=account,
-            code="89621",
-            requester_user_id=1234567890123,
-            reply_to_message_id=987654321,
-        )
+        with self.assertRaisesRegex(RuntimeError, "original request"):
+            await _send_code_delivery(
+                bot,
+                chat_id=-1001234567890123,
+                account=account,
+                code="89621",
+                requester_user_id=1234567890123,
+                reply_to_message_id=987654321,
+            )
 
-        self.assertGreaterEqual(len(bot.calls), 2)
-        self.assertEqual(bot.calls[-1][1]["reply_to_message_id"], None)
-        self.assertIn("89621", bot.calls[-1][0][1])
+        self.assertEqual(len(bot.calls), 3)
+        self.assertTrue(all(call[1]["reply_to_message_id"] == 987654321 for call in bot.calls))
 
     async def test_code_delivery_includes_twofa_from_json(self):
         bot = FakeBot()
@@ -102,6 +102,7 @@ class CodeButtonTests(unittest.IsolatedAsyncioTestCase):
                 reply_to_message_id=987654321,
             )
 
+        self.assertEqual(bot.calls[0][1]["reply_to_message_id"], 987654321)
         text = bot.calls[0][0][1]
         self.assertIn("89621", text)
         self.assertIn("2FA", text)

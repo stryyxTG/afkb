@@ -1,0 +1,217 @@
+from html import escape
+
+from aiogram import F, Router
+from aiogram.filters import Command, Filter
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from tglol.config import Config
+from tglol.db import (
+    clear_worker_activity, get_worker, list_workers, revoke_worker_access,
+    save_worker, worker_activity_stats,
+)
+from tglol.handlers import _parse_telegram_user_id, _resolve_worker_identity
+from tglol.states import AddWorker
+
+router = Router(name="worker_admin")
+PAGE_SIZE = 10
+
+
+class AdminOnly(Filter):
+    async def __call__(self, event, config: Config) -> bool:
+        return bool(event.from_user and event.from_user.id in config.admin_ids)
+
+
+router.message.filter(AdminOnly())
+router.callback_query.filter(AdminOnly())
+
+
+def keyboard(*buttons):
+    builder = InlineKeyboardBuilder()
+    for label, data in buttons:
+        builder.button(text=label, callback_data=data)
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def menu():
+    return keyboard(
+        ("Список воркеров", "workers:list:0"),
+        ("Добавить по ID", "workers:add"),
+        ("Статистика", "workers:stats:0"),
+        ("Сбросить всю статистику", "workers:reset_ask:all"),
+        ("Назад", "accounts:menu"),
+    )
+
+
+def worker_label(worker):
+    name = " ".join(part for part in (worker.first_name, worker.last_name) if part)
+    return f"@{worker.username}" if worker.username else name or "Без имени"
+
+
+def stats_text(stats):
+    return (
+        f"Запросов: <b>{stats.get('requests', 0)}</b>\n"
+        f"Запрошено аккаунтов: <b>{stats.get('requested', 0)}</b>\n"
+        f"Аккаунтов с отправленным кодом: <b>{stats.get('delivered', 0)}</b>"
+    )
+
+
+def listing(config: Config, page: int = 0, *, statistics: bool = False):
+    workers = list_workers(config)
+    pages = max(1, (len(workers) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    stats = worker_activity_stats(config) if statistics else {}
+    selected = workers[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    title = "Статистика воркеров" if statistics else "Воркеры"
+    lines = [f"<b>{title}</b> · {len(workers)}", f"Страница {page + 1}/{pages}"]
+    buttons = []
+    for worker in selected:
+        buttons.append((f"{worker_label(worker)[:40]} · {worker.user_id}", f"workers:open:{worker.user_id}"))
+        if statistics:
+            lines.append(f"\n{escape(worker_label(worker))} · <code>{worker.user_id}</code>\n"
+                         + stats_text(stats.get(worker.user_id, {})))
+    if not workers:
+        lines.append("Список пуст. Добавь воркера по Telegram ID.")
+    prefix = "stats" if statistics else "list"
+    if page:
+        buttons.append(("‹ Назад", f"workers:{prefix}:{page - 1}"))
+    if page + 1 < pages:
+        buttons.append(("Вперёд ›", f"workers:{prefix}:{page + 1}"))
+    buttons.append(("Меню воркеров", "workers:menu"))
+    return "\n".join(lines), keyboard(*buttons)
+
+
+def reset_prompt(target):
+    scope = "всех воркеров" if target == "all" else "этого воркера"
+    return (
+        f"Сбросить статистику {scope}? Доступ и аккаунты сохранятся.",
+        keyboard(("Да, сбросить", f"workers:reset_confirm:{target}"),
+                 ("Отмена", "workers:menu")),
+    )
+
+
+@router.message(Command("workers"))
+async def workers_command(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Воркеры", reply_markup=menu())
+
+
+@router.message(Command("stats"))
+async def stats_command(message: Message, state: FSMContext, config: Config):
+    await state.clear()
+    text, markup = listing(config, statistics=True)
+    await message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.message(Command("reset"))
+async def reset_command(message: Message, state: FSMContext):
+    await state.clear()
+    text, markup = reset_prompt("all")
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data == "workers:menu")
+async def show_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.answer()
+    await callback.message.edit_text("Воркеры", reply_markup=menu())
+
+
+@router.callback_query(F.data == "workers:add")
+async def ask_worker(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(AddWorker.waiting_user_id)
+    await callback.answer()
+    await callback.message.edit_text(
+        "Отправь числовой Telegram ID воркера.",
+        reply_markup=keyboard(("Отмена", "workers:menu")),
+    )
+
+
+@router.message(AddWorker.waiting_user_id, ~F.text.startswith("/"))
+async def add_worker(message: Message, state: FSMContext, config: Config, bot):
+    user_id = _parse_telegram_user_id(message.text or "")
+    if user_id is None:
+        await message.answer("Нужен положительный числовой Telegram ID. Для отмены: /cancel.")
+        return
+    if get_worker(config, user_id):
+        await state.clear()
+        await message.answer("Этот воркер уже в списке.", reply_markup=menu())
+        return
+    first_name, last_name, username = await _resolve_worker_identity(bot, config, user_id)
+    save_worker(config, user_id=user_id, first_name=first_name, last_name=last_name,
+                username=username, remaining_limit=0, created_by=message.from_user.id)
+    await state.clear()
+    label = f"@{username}" if username else first_name
+    note = "" if username else "\nЕсли ник пока недоступен, он обновится при обращении воркера к боту."
+    await message.answer(
+        f"Доступ выдан: {escape(label)} · <code>{user_id}</code>{note}",
+        reply_markup=menu(), parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("workers:list:"))
+@router.callback_query(F.data.startswith("workers:stats:"))
+async def show_list(callback: CallbackQuery, config: Config, state: FSMContext):
+    await state.clear()
+    _, action, raw_page = callback.data.split(":")
+    try:
+        page = int(raw_page)
+    except ValueError:
+        await callback.answer("Некорректная страница.")
+        return
+    text, markup = listing(config, page, statistics=action == "stats")
+    await callback.answer()
+    await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("workers:open:"))
+async def show_worker(callback: CallbackQuery, config: Config):
+    raw = callback.data.rsplit(":", 1)[-1]
+    user_id = _parse_telegram_user_id(raw)
+    worker = get_worker(config, user_id) if user_id else None
+    if not worker:
+        await callback.answer("Воркер не найден.", show_alert=True)
+        return
+    stats = worker_activity_stats(config).get(user_id, {})
+    await callback.answer()
+    await callback.message.edit_text(
+        f"<b>{escape(worker_label(worker))}</b>\nID: <code>{user_id}</code>\n\n{stats_text(stats)}",
+        reply_markup=keyboard(
+            ("Сбросить статистику", f"workers:reset_ask:{user_id}"),
+            ("Забрать доступ", f"workers:revoke_ask:{user_id}"),
+            ("Назад", "workers:list:0"),
+        ), parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("workers:reset_ask:"))
+@router.callback_query(F.data.startswith("workers:reset_confirm:"))
+@router.callback_query(F.data.startswith("workers:revoke_ask:"))
+@router.callback_query(F.data.startswith("workers:revoke_confirm:"))
+async def manage_worker(callback: CallbackQuery, config: Config):
+    _, action, target = callback.data.split(":")
+    user_id = _parse_telegram_user_id(target)
+    if target != "all" and (user_id is None or get_worker(config, user_id) is None):
+        await callback.answer("Воркер не найден.", show_alert=True)
+        return
+    if target == "all" and action.startswith("revoke"):
+        await callback.answer("Некорректный запрос.")
+        return
+    if action == "reset_ask":
+        text, markup = reset_prompt(target)
+    elif action == "reset_confirm":
+        clear_worker_activity(config, user_id)
+        text, markup = "Статистика сброшена. Доступ и аккаунты сохранены.", menu()
+    elif action == "revoke_ask":
+        worker = get_worker(config, user_id)
+        text = f"Забрать доступ у {escape(worker_label(worker))} ({user_id})? Его статистика будет удалена."
+        markup = keyboard(("Да, забрать доступ", f"workers:revoke_confirm:{user_id}"),
+                          ("Отмена", f"workers:open:{user_id}"))
+    else:
+        revoke_worker_access(config, user_id)
+        text, markup = "Доступ воркера отозван.", menu()
+    await callback.answer()
+    await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")

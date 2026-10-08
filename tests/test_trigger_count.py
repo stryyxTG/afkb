@@ -14,7 +14,7 @@ class TriggerCountParserTests(unittest.TestCase):
         self.assertEqual(_parse_trigger_request_count("тг"), 1)
 
     def test_count_is_clamped_to_twenty(self):
-        self.assertEqual(_parse_trigger_request_count("999 тг"), 20)
+        self.assertEqual(_parse_trigger_request_count("999 тг"), 10)
 
 
 if __name__ == "__main__":

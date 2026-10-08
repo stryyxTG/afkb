@@ -22,6 +22,10 @@ from telethon.errors import SessionPasswordNeededError
 from tglol.config import Config
 from tglol.db import (
     add_account,
+    get_worker,
+    update_worker_identity,
+    record_worker_request,
+    record_worker_delivery,
     claim_accounts_for_worker,
     connect,
     count_accounts,
@@ -122,6 +126,14 @@ class AccessMiddleware(BaseMiddleware):
             and (event.data.startswith("account:request_code:") or event.data.startswith("arc:"))
         )
         if is_trigger_chat and (is_trigger_text or is_worker_code_button):
+            if get_worker(config, user.id) is None:
+                if isinstance(event, CallbackQuery):
+                    await event.answer("Доступ к аккаунтам закрыт.", show_alert=True)
+                return None
+            update_worker_identity(
+                config, user.id, first_name=user.first_name or "Без имени",
+                last_name=user.last_name, username=user.username,
+            )
             return await handler(event, data)
 
         return None
@@ -682,29 +694,25 @@ async def _send_code_delivery(
             ]
         ]
     )
+    if reply_to_message_id is None:
+        raise ValueError("code delivery requires the original request message ID")
+
     last_error: Exception | None = None
-    reply_variants = [reply_to_message_id]
-    if reply_to_message_id is not None:
-        reply_variants.append(None)
-    for reply_id in reply_variants:
-        for attempt in range(3):
-            try:
-                await bot.send_message(
-                    chat_id,
-                    "\n".join(lines),
-                    reply_to_message_id=reply_id,
-                    parse_mode="HTML",
-                    reply_markup=markup,
-                )
-                return
-            except Exception as exc:
-                last_error = exc
-                if attempt < 2:
-                    await asyncio.sleep(1 + attempt)
-        if reply_id is not None:
-            logger.info("Code delivery with reply failed for account %s, retrying without reply: %s", account.id, last_error)
-    if last_error:
-        raise last_error
+    for attempt in range(3):
+        try:
+            await bot.send_message(
+                chat_id,
+                "\n".join(lines),
+                reply_to_message_id=reply_to_message_id,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                await asyncio.sleep(1 + attempt)
+    raise RuntimeError("could not deliver code as a reply to the original request") from last_error
 
 
 def _terminal_code_poll_status(exc: Exception) -> str | None:
@@ -791,14 +799,13 @@ def _restore_clean_stage_after_code_timeout(config: Config, account) -> str:
 
 
 def _finalize_requested_account_stages(config: Config, accounts: list, code_received_ids: set[int]) -> dict[str, int]:
-    target_all_as_issued = bool(code_received_ids)
     result = {"issued": 0, "restored": 0, "skipped": 0}
     for account in accounts:
         current = get_account(config, account.id)
         if not current or current.account_stage != "processing":
             result["skipped"] += 1
             continue
-        if target_all_as_issued:
+        if account.id in code_received_ids:
             set_account_stage(config, account.id, "issued")
             result["issued"] += 1
         else:
@@ -814,13 +821,13 @@ async def _watch_requested_account_codes(
     requester_user_id: int,
     reply_to_message_id: int | None,
     started_at: datetime,
+    worker_request_id: int | None = None,
 ) -> None:
     seen_keys: dict[int, set[str]] = {account.id: set() for account in accounts}
     pending_ids = {account.id for account in accounts}
     code_received_ids: set[int] = set()
     poll_semaphore = asyncio.Semaphore(CODE_WATCH_MAX_CONCURRENT_POLLS)
     deadline = time.monotonic() + CODE_WATCH_SECONDS
-    stages_finalized_after_delivery = False
 
     async def poll_account(account):
         async with poll_semaphore:
@@ -863,15 +870,9 @@ async def _watch_requested_account_codes(
                     seen_keys.setdefault(account.id, set()).add(code_message.key)
                     pending_ids.discard(account.id)
                     code_received_ids.add(account.id)
-                    if not stages_finalized_after_delivery:
-                        stage_result = _finalize_requested_account_stages(config, accounts, code_received_ids)
-                        stages_finalized_after_delivery = True
-                        logger.info(
-                            "Code watcher immediately finalized requested accounts after delivery: issued=%s restored=%s skipped=%s",
-                            stage_result["issued"],
-                            stage_result["restored"],
-                            stage_result["skipped"],
-                        )
+                    if worker_request_id is not None:
+                        record_worker_delivery(config, worker_request_id)
+                    _finalize_requested_account_stages(config, [account], code_received_ids)
                 except Exception as exc:
                     logger.warning("Cannot send Telegram code for account %s: %s", account.id, exc)
             if pending_ids and time.monotonic() < deadline:
@@ -894,7 +895,7 @@ def _parse_trigger_request_count(text: str) -> int:
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
-            return max(1, min(int(match.group(1)), 20))
+            return max(1, min(int(match.group(1)), 10))
     return 1
 
 
@@ -925,10 +926,13 @@ async def _notify_owners(bot: Bot, config: Config, *, reason: str, account_phone
 
 
 async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None:
+    requester_id = message.from_user.id if message.from_user else 0
+    if requester_id not in config.admin_ids and get_worker(config, requester_id) is None:
+        return
     requested = _parse_trigger_request_count(message.text or "")
+    worker_request_id = record_worker_request(config, requester_id, requested)
     requested_count = requested
 
-    requester_id = message.from_user.id if message.from_user else 0
     claimed_accounts: list = []
     skipped_ids: set[int] = set()
     while len(claimed_accounts) < requested:
@@ -988,7 +992,16 @@ async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None
         return
     started_at = datetime.now(timezone.utc)
     phone_lines = [f"<code>{escape(_phone_without_plus(account.phone))}</code>" for account in claimed_accounts]
-    await message.answer("\u041d\u043e\u043c\u0435\u0440\u0430:\n" + "\n".join(phone_lines), reply_to_message_id=message.message_id)
+    try:
+        await message.answer("\u041d\u043e\u043c\u0435\u0440\u0430:\n" + "\n".join(phone_lines), reply_to_message_id=message.message_id)
+    except Exception:
+        stage_result = _finalize_requested_account_stages(config, claimed_accounts, set())
+        logger.exception(
+            "Could not send account numbers; restored request accounts: restored=%s skipped=%s",
+            stage_result["restored"],
+            stage_result["skipped"],
+        )
+        return
 
     watcher = asyncio.create_task(
         _watch_requested_account_codes(
@@ -999,6 +1012,7 @@ async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None
             requester_user_id=requester_id,
             reply_to_message_id=message.message_id,
             started_at=started_at,
+            worker_request_id=worker_request_id,
         )
     )
     watcher.add_done_callback(_log_code_watcher_result)
@@ -1191,23 +1205,6 @@ async def cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer("Отменено.", reply_markup=accounts_menu())
 
-
-@router.message(Command("reset"))
-async def reset_workers_command(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer("Логика воркеров отключена.")
-
-
-@router.message(Command("stats"))
-async def worker_stats_command(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer("Логика воркеров отключена.")
-
-
-@router.message(Command("workers"))
-async def workers_command(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer("Логика воркеров отключена.")
 
 @router.callback_query(F.data == "noop")
 async def noop(callback: CallbackQuery) -> None:

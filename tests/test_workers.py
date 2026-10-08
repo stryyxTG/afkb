@@ -73,6 +73,15 @@ class AccountClaimTests(unittest.TestCase):
 
 
 
+    def test_restart_returns_processing_accounts_to_clean(self):
+        account_id = self.add_account("45001")
+        self.assertTrue(claim_accounts_for_worker(
+            self.config, [account_id], worker_id=None, reserve_stage="processing"
+        ))
+
+        init_db(self.config)
+
+        self.assertEqual(get_account(self.config, account_id).account_stage, "nereg")
     def test_claim_does_not_reserve_frozen_accounts(self):
         account_id = self.add_account("50001", status="frozen")
 
