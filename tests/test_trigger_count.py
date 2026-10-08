@@ -13,7 +13,7 @@ class TriggerCountParserTests(unittest.TestCase):
     def test_missing_count_defaults_to_one(self):
         self.assertEqual(_parse_trigger_request_count("тг"), 1)
 
-    def test_count_is_clamped_to_twenty(self):
+    def test_count_is_clamped_to_ten(self):
         self.assertEqual(_parse_trigger_request_count("999 тг"), 10)
 
 

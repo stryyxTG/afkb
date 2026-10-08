@@ -28,6 +28,7 @@ def accounts_menu() -> InlineKeyboardMarkup:
     builder.button(text="Хранилище", callback_data="accounts:common_sections")
     builder.button(text="Скан", callback_data="scan_accounts")
     builder.button(text="Воркеры", callback_data="workers:menu")
+    builder.button(text="Администраторы", callback_data="admins:menu")
     builder.button(text="\u041f\u0440\u043e\u043a\u0441\u0438", callback_data="proxy:menu")
     builder.adjust(1)
     return builder.as_markup()

@@ -87,6 +87,8 @@ sudo systemctl restart tgbot
 
 Admins can open **Воркеры** from the main menu or use `/workers` to add a worker by numeric Telegram ID, view their username, and revoke access. If Telegram cannot resolve the username immediately, it is updated from the worker's next accepted trigger/button interaction. Workers without a username are shown by name and ID.
 
+Use /admins to view the administrator list, grant access by Telegram ID, or revoke another administrator''s access. Changes take effect immediately and the managed ID list is saved in ADMIN_IDS in .env; the last administrator cannot be removed.
+
 Only listed workers and bot admins may request accounts in `TRIGGER_CHAT_ID`. Workers do not have access to the admin menu. There are no per-worker quotas; each trigger requests at most 10 accounts.
 
 `/stats` shows the number of requests, requested accounts, and accounts whose code was successfully sent. Empty-stock requests count too. Only workers in the list are included in these statistics; admins can request accounts without being added. Repeat-code buttons do not count as a new account request or issuance.

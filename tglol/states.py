@@ -15,6 +15,9 @@ class AddWorker(StatesGroup):
     waiting_user_id = State()
     waiting_limit = State()
 
+class AddAdmin(StatesGroup):
+    waiting_user_id = State()
+
 
 class ChangeWorkerLimit(StatesGroup):
     waiting_limit = State()

@@ -46,11 +46,54 @@ def _parse_admin_ids(raw: str, *, source: str) -> frozenset[int]:
     return frozenset(ids)
 
 
-def _get_owner_ids() -> frozenset[int]:
-    raw = os.getenv("OWNER_IDS", "").strip()
-    if raw and not raw.startswith("PUT_"):
-        return _parse_admin_ids(raw, source="OWNER_IDS")
-    return _parse_admin_ids(_get_required("ADMIN_IDS"), source="ADMIN_IDS")
+def _get_admin_ids() -> frozenset[int]:
+    """Load persistent admins and optional immutable owners from .env."""
+    admin_raw = os.getenv("ADMIN_IDS", "").strip()
+    owner_raw = os.getenv("OWNER_IDS", "").strip()
+    admin_ids = (
+        _parse_admin_ids(admin_raw, source="ADMIN_IDS")
+        if admin_raw and not admin_raw.startswith("PUT_")
+        else frozenset()
+    )
+    owner_ids = (
+        _parse_admin_ids(owner_raw, source="OWNER_IDS")
+        if owner_raw and not owner_raw.startswith("PUT_")
+        else frozenset()
+    )
+    if not admin_ids and not owner_ids:
+        raise RuntimeError("Set ADMIN_IDS in .env")
+    return admin_ids | owner_ids
+
+
+def _write_env_value(name: str, value: str) -> None:
+    path = Path(".env")
+    line = f"{name}={value}"
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    for index, existing in enumerate(lines):
+        if existing.startswith(f"{name}="):
+            lines[index] = line
+            break
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(line)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def set_admin_ids(config: Config, admin_ids: set[int] | frozenset[int]) -> None:
+    """Persist the managed admin list and apply it without a bot restart."""
+    normalized = frozenset(int(user_id) for user_id in admin_ids if int(user_id) > 0)
+    owner_raw = os.getenv("OWNER_IDS", "").strip()
+    owner_ids = (
+        _parse_admin_ids(owner_raw, source="OWNER_IDS")
+        if owner_raw and not owner_raw.startswith("PUT_")
+        else frozenset()
+    )
+    normalized |= owner_ids
+    if not normalized:
+        raise ValueError("At least one administrator is required")
+    _write_env_value("ADMIN_IDS", ",".join(str(user_id) for user_id in sorted(normalized)))
+    object.__setattr__(config, "admin_ids", normalized)
 
 
 def _get_optional_int(name: str) -> int | None:
@@ -66,7 +109,7 @@ def load_config() -> Config:
     data_dir = Path(os.getenv("DATA_DIR", "storage"))
     return Config(
         bot_token=_get_required("BOT_TOKEN"),
-        admin_ids=_get_owner_ids(),
+        admin_ids=_get_admin_ids(),
         telegram_api_id=int(_get_required("TELEGRAM_API_ID")),
         telegram_api_hash=_get_required("TELEGRAM_API_HASH"),
         telegram_proxy=os.getenv("TELEGRAM_PROXY", "").strip() or None,

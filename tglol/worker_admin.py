@@ -1,4 +1,4 @@
-from html import escape
+﻿from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import Command, Filter
@@ -6,13 +6,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from tglol.config import Config
+from tglol.config import Config, set_admin_ids
 from tglol.db import (
     clear_worker_activity, get_worker, list_workers, revoke_worker_access,
     save_worker, worker_activity_stats,
 )
 from tglol.handlers import _parse_telegram_user_id, _resolve_worker_identity
-from tglol.states import AddWorker
+from tglol.states import AddAdmin, AddWorker
 
 router = Router(name="worker_admin")
 PAGE_SIZE = 10
@@ -41,6 +41,14 @@ def menu():
         ("Добавить по ID", "workers:add"),
         ("Статистика", "workers:stats:0"),
         ("Сбросить всю статистику", "workers:reset_ask:all"),
+        ("Назад", "accounts:menu"),
+    )
+
+
+def admins_menu():
+    return keyboard(
+        ("Список администраторов", "admins:list"),
+        ("Выдать доступ по ID", "admins:add"),
         ("Назад", "accounts:menu"),
     )
 
@@ -83,6 +91,17 @@ def listing(config: Config, page: int = 0, *, statistics: bool = False):
     return "\n".join(lines), keyboard(*buttons)
 
 
+def admins_listing(config: Config):
+    admin_ids = sorted(config.admin_ids)
+    lines = [f"<b>Администраторы</b> · {len(admin_ids)}"]
+    buttons = []
+    for user_id in admin_ids:
+        lines.append(f"• <code>{user_id}</code>")
+        buttons.append((f"Убрать {user_id}", f"admins:remove_ask:{user_id}"))
+    buttons.append(("Меню администраторов", "admins:menu"))
+    return "\n".join(lines), keyboard(*buttons)
+
+
 def reset_prompt(target):
     scope = "всех воркеров" if target == "all" else "этого воркера"
     return (
@@ -90,6 +109,93 @@ def reset_prompt(target):
         keyboard(("Да, сбросить", f"workers:reset_confirm:{target}"),
                  ("Отмена", "workers:menu")),
     )
+
+
+@router.message(Command("admins"))
+async def admins_command(message: Message, state: FSMContext, config: Config):
+    await state.clear()
+    raw_id = (message.text or "").partition(" ")[2].strip()
+    if raw_id:
+        await grant_admin(message, state, config, raw_id)
+        return
+    await message.answer("Администраторы", reply_markup=admins_menu())
+
+
+@router.callback_query(F.data == "admins:menu")
+async def show_admins_menu(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.answer()
+    await callback.message.edit_text("Администраторы", reply_markup=admins_menu())
+
+
+@router.callback_query(F.data == "admins:list")
+async def show_admins_list(callback: CallbackQuery, config: Config):
+    text, markup = admins_listing(config)
+    await callback.answer()
+    await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "admins:add")
+async def ask_admin(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(AddAdmin.waiting_user_id)
+    await callback.answer()
+    await callback.message.edit_text(
+        "Отправь числовой Telegram ID нового администратора.",
+        reply_markup=keyboard(("Отмена", "admins:menu")),
+    )
+
+
+async def grant_admin(message: Message, state: FSMContext, config: Config, raw_id: str) -> None:
+    user_id = _parse_telegram_user_id(raw_id)
+    if user_id is None:
+        await message.answer("Нужен положительный числовой Telegram ID. Для отмены: /cancel.")
+        return
+    if user_id in config.admin_ids:
+        await state.clear()
+        await message.answer("Этот пользователь уже администратор.", reply_markup=admins_menu())
+        return
+    set_admin_ids(config, set(config.admin_ids) | {user_id})
+    await state.clear()
+    await message.answer(
+        f"Доступ администратора выдан: <code>{user_id}</code>. ID сохранён в .env.",
+        reply_markup=admins_menu(), parse_mode="HTML",
+    )
+
+
+@router.message(AddAdmin.waiting_user_id, ~F.text.startswith("/"))
+async def add_admin(message: Message, state: FSMContext, config: Config):
+    await grant_admin(message, state, config, message.text or "")
+
+
+@router.callback_query(F.data.startswith("admins:remove_ask:"))
+@router.callback_query(F.data.startswith("admins:remove_confirm:"))
+async def remove_admin(callback: CallbackQuery, config: Config):
+    _, action, raw_id = callback.data.split(":")
+    user_id = _parse_telegram_user_id(raw_id)
+    if user_id is None or user_id not in config.admin_ids:
+        await callback.answer("Администратор не найден.", show_alert=True)
+        return
+    if action == "remove_ask":
+        if len(config.admin_ids) == 1:
+            await callback.answer("Нельзя удалить последнего администратора.", show_alert=True)
+            return
+        await callback.answer()
+        await callback.message.edit_text(
+            f"Забрать доступ администратора у <code>{user_id}</code>?",
+            reply_markup=keyboard(
+                ("Да, забрать доступ", f"admins:remove_confirm:{user_id}"),
+                ("Отмена", "admins:list"),
+            ), parse_mode="HTML",
+        )
+        return
+    if callback.from_user.id == user_id:
+        await callback.answer("Свой доступ нельзя отозвать из этого меню.", show_alert=True)
+        return
+    set_admin_ids(config, set(config.admin_ids) - {user_id})
+    await callback.answer("Доступ администратора отозван.")
+    text, markup = admins_listing(config)
+    await callback.message.edit_text(text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.message(Command("workers"))
