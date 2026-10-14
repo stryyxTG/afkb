@@ -13,8 +13,8 @@ class TriggerCountParserTests(unittest.TestCase):
     def test_missing_count_defaults_to_one(self):
         self.assertEqual(_parse_trigger_request_count("\u0442\u0433"), 1)
 
-    def test_count_is_clamped_to_ten(self):
-        self.assertEqual(_parse_trigger_request_count("999 \u0442\u0433"), 10)
+    def test_count_is_clamped_to_fifteen(self):
+        self.assertEqual(_parse_trigger_request_count("999 \u0442\u0433"), 15)
 
 
 if __name__ == "__main__":

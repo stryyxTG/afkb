@@ -931,7 +931,7 @@ def _parse_trigger_request_count(text: str, trigger_word: str = "\u0442\u0433") 
     for pattern in patterns:
         match = re.search(pattern, text or "", flags=re.IGNORECASE)
         if match:
-            return max(1, min(int(match.group(1)), 10))
+            return max(1, min(int(match.group(1)), 15))
     return 1
 
 
