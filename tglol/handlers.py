@@ -1479,7 +1479,12 @@ async def save_trigger_word(message: Message, state: FSMContext, config: Config)
     if not word or len(word) > 32 or any(char.isspace() for char in word):
         await message.answer("Нужно одно непустое слово длиной до 32 символов без пробелов, или /cancel.")
         return
-    _set_config_trigger_word(config, word)
+    try:
+        _set_config_trigger_word(config, word)
+    except OSError:
+        logger.exception("Cannot save trigger word to .env")
+        await message.answer("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0443. \u041f\u0440\u043e\u0432\u0435\u0440\u044c \u043f\u0440\u0430\u0432\u0430 \u0431\u043e\u0442\u0430 \u043d\u0430 \u0444\u0430\u0439\u043b .env.")
+        return
     await state.clear()
     await message.answer(
         f"Триггерное слово сохранено: <code>{escape(word)}</code>.",
@@ -1493,7 +1498,12 @@ async def save_trigger_chat(message: Message, state: FSMContext, config: Config)
     if chat_id is None:
         await message.answer("Нужен числовой ID чата, например <code>-1001234567890</code>, или /cancel.")
         return
-    _set_config_trigger_chat(config, chat_id)
+    try:
+        _set_config_trigger_chat(config, chat_id)
+    except OSError:
+        logger.exception("Cannot save trigger chat to .env")
+        await message.answer("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0443. \u041f\u0440\u043e\u0432\u0435\u0440\u044c \u043f\u0440\u0430\u0432\u0430 \u0431\u043e\u0442\u0430 \u043d\u0430 \u0444\u0430\u0439\u043b .env.")
+        return
     await state.clear()
     await message.answer(
         f"Чат-триггер сохранён: <code>{chat_id}</code>.",

@@ -1,9 +1,10 @@
 ﻿import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from tglol.handlers import (
     _contains_trigger_word, _parse_trigger_request_count, _parse_telegram_chat_id,
-    _set_config_trigger_chat, _set_config_trigger_word,
+    _set_config_trigger_chat, _set_config_trigger_word, save_trigger_chat,
 )
 from tglol.keyboards import accounts_menu, trigger_menu
 import test_workers
@@ -46,6 +47,24 @@ class TriggerSettingsTests(unittest.TestCase):
         callbacks = [button.callback_data for row in trigger_menu(has_trigger=True).inline_keyboard for button in row]
         self.assertIn("trigger:clear", callbacks)
         self.assertIn("trigger:word", callbacks)
+
+
+class TriggerSettingsMessageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.case = test_workers.AccountClaimTests()
+        self.case.setUp()
+        self.config = self.case.config
+
+    def tearDown(self):
+        self.case.tearDown()
+
+    async def test_chat_save_reports_env_permission_error(self):
+        message = SimpleNamespace(text="-1001234567890", answer=AsyncMock())
+        state = SimpleNamespace(clear=AsyncMock())
+        with patch("tglol.handlers._set_config_trigger_chat", side_effect=PermissionError):
+            await save_trigger_chat(message, state, self.config)
+        state.clear.assert_not_awaited()
+        self.assertIn(".env", message.answer.await_args.args[0])
 
 
 if __name__ == "__main__":
