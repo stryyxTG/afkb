@@ -9,10 +9,12 @@ from datetime import datetime, timezone
 import test_workers
 from tglol.db import (
     clear_worker_activity, get_account, get_worker, init_db, record_worker_delivery,
-    record_worker_request, revoke_worker_access, save_worker, worker_activity_stats,
+    record_worker_request, revoke_worker_access, save_worker, worker_activity_stats, list_worker_deliveries,
 )
 from tglol.handlers import AccessMiddleware, _give_out_accounts
-from tglol.worker_admin import AdminOnly, listing, add_worker, router as worker_router
+from tglol.worker_admin import (
+    AdminOnly, add_worker, delivery_report_text, listing, menu, router as worker_router,
+)
 
 
 class WorkerAccessTests(unittest.IsolatedAsyncioTestCase):
@@ -85,6 +87,22 @@ class WorkerAccessTests(unittest.IsolatedAsyncioTestCase):
         await _give_out_accounts(message, SimpleNamespace(), self.config)
         self.assertEqual(worker_activity_stats(self.config), {})
         message.answer.assert_not_awaited()
+
+    def test_delivery_report_contains_only_delivered_phone_and_requester(self):
+        self.grant(2, "requested_by")
+        account_id = self.add_account("40001")
+        request_id = record_worker_request(self.config, 2, 1)
+        record_worker_delivery(self.config, request_id, get_account(self.config, account_id))
+        deliveries = list_worker_deliveries(self.config)
+        self.assertEqual(len(deliveries), 1)
+        self.assertEqual((deliveries[0].phone, deliveries[0].worker_id), ("40001", 2))
+        report = delivery_report_text(self.config)
+        self.assertIn("40001", report)
+        self.assertIn("@requested_by", report)
+        clear_worker_activity(self.config)
+        self.assertEqual(list_worker_deliveries(self.config), [])
+        callbacks = [button.callback_data for row in menu().inline_keyboard for button in row]
+        self.assertIn("workers:report", callbacks)
 
     def test_reset_is_scoped_and_late_delivery_cannot_restore_old_stats(self):
         self.grant(2)

@@ -897,7 +897,7 @@ async def _watch_requested_account_codes(
                     pending_ids.discard(account.id)
                     code_received_ids.add(account.id)
                     if worker_request_id is not None:
-                        record_worker_delivery(config, worker_request_id)
+                        record_worker_delivery(config, worker_request_id, current)
                     _finalize_requested_account_stages(config, [account], code_received_ids)
                 except Exception as exc:
                     logger.warning("Cannot send Telegram code for account %s: %s", account.id, exc)

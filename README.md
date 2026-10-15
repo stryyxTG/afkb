@@ -91,7 +91,7 @@ Use /admins to view the administrator list, grant access by Telegram ID, or revo
 
 Only listed workers and bot admins may request accounts in `TRIGGER_CHAT_ID`. Workers do not have access to the admin menu. There are no per-worker quotas; each trigger requests at most 15 accounts.
 
-`/stats` shows the number of requests, requested accounts, and accounts whose code was successfully sent. Empty-stock requests count too. Only workers in the list are included in these statistics; admins can request accounts without being added. Repeat-code buttons do not count as a new account request or issuance.
+`/stats` sends a TXT file with only real deliveries: every phone number for which the code was successfully sent, the requesting worker, their Telegram ID, and the delivery time. Numbers without a delivered code are excluded. Resetting worker statistics clears this delivery journal too.
 
 Statistics can be reset for one worker or everyone (also via `/reset`), with confirmation. Reset preserves access and accounts; pending requests from before the reset do not repopulate the cleared statistics. Revoking a worker removes their statistics. Data is stored in SQLite and survives restarts.
 

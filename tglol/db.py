@@ -50,6 +50,16 @@ CREATE TABLE IF NOT EXISTS worker_activity (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS worker_activity_user ON worker_activity(worker_id);
+CREATE TABLE IF NOT EXISTS worker_deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id INTEGER NOT NULL,
+    worker_id INTEGER NOT NULL,
+    account_id INTEGER NOT NULL,
+    phone TEXT,
+    delivered_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(activity_id, account_id)
+);
+CREATE INDEX IF NOT EXISTS worker_deliveries_worker ON worker_deliveries(worker_id);
 
 """
 
@@ -97,6 +107,17 @@ class WorkerStats:
     requested_count: int
     issued_count: int
     phones: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WorkerDelivery:
+    worker_id: int
+    first_name: str
+    last_name: str | None
+    username: str | None
+    account_id: int
+    phone: str | None
+    delivered_at: str
 
 
 @dataclass(frozen=True)
@@ -695,13 +716,51 @@ def record_worker_request(config: Config, user_id: int, requested_count: int) ->
         return int(cursor.lastrowid) if cursor.rowcount else None
 
 
-def record_worker_delivery(config: Config, request_id: int) -> None:
-    # Reset deletes requests; a late completion cannot recreate old statistics.
+def record_worker_delivery(config: Config, request_id: int, account: Account | None = None) -> None:
+    """Record a delivered code; account details are stored only after a real delivery."""
     with connect(config) as connection:
-        connection.execute(
-            "UPDATE worker_activity SET delivered_count = delivered_count + 1 WHERE id = ?",
-            (request_id,),
+        if account is None:
+            connection.execute(
+                "UPDATE worker_activity SET delivered_count = delivered_count + 1 WHERE id = ?",
+                (request_id,),
+            )
+            return
+        activity = connection.execute(
+            "SELECT worker_id FROM worker_activity WHERE id = ?", (request_id,)
+        ).fetchone()
+        if not activity:
+            return
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO worker_deliveries (
+                activity_id, worker_id, account_id, phone
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (request_id, int(activity["worker_id"]), account.id, account.phone),
         )
+        if cursor.rowcount:
+            connection.execute(
+                "UPDATE worker_activity SET delivered_count = delivered_count + 1 WHERE id = ?",
+                (request_id,),
+            )
+
+
+def list_worker_deliveries(config: Config, user_id: int | None = None) -> list[WorkerDelivery]:
+    clauses = "WHERE d.worker_id = ?" if user_id is not None else ""
+    params: tuple[int, ...] = (user_id,) if user_id is not None else ()
+    with connect(config) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT d.worker_id, w.first_name, w.last_name, w.username,
+                   d.account_id, d.phone, d.delivered_at
+            FROM worker_deliveries d
+            JOIN workers w ON w.user_id = d.worker_id
+            {clauses}
+            ORDER BY d.id
+            """,
+            params,
+        ).fetchall()
+    return [WorkerDelivery(**dict(row)) for row in rows]
 
 
 def worker_activity_stats(config: Config) -> dict[int, dict[str, int]]:
@@ -716,12 +775,15 @@ def worker_activity_stats(config: Config) -> dict[int, dict[str, int]]:
 def clear_worker_activity(config: Config, user_id: int | None = None) -> None:
     with connect(config) as connection:
         if user_id is None:
+            connection.execute("DELETE FROM worker_deliveries")
             connection.execute("DELETE FROM worker_activity")
         else:
+            connection.execute("DELETE FROM worker_deliveries WHERE worker_id = ?", (user_id,))
             connection.execute("DELETE FROM worker_activity WHERE worker_id = ?", (user_id,))
 
 
 def revoke_worker_access(config: Config, user_id: int) -> None:
     with connect(config) as connection:
+        connection.execute("DELETE FROM worker_deliveries WHERE worker_id = ?", (user_id,))
         connection.execute("DELETE FROM worker_activity WHERE worker_id = ?", (user_id,))
         connection.execute("DELETE FROM workers WHERE user_id = ?", (user_id,))

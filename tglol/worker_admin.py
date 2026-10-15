@@ -3,13 +3,13 @@
 from aiogram import F, Router
 from aiogram.filters import Command, Filter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from tglol.config import Config, set_admin_ids
 from tglol.db import (
     clear_worker_activity, get_worker, list_workers, revoke_worker_access,
-    save_worker, worker_activity_stats,
+    save_worker, worker_activity_stats, list_worker_deliveries,
 )
 from tglol.handlers import _parse_telegram_user_id, _resolve_worker_identity
 from tglol.states import AddAdmin, AddWorker
@@ -39,7 +39,7 @@ def menu():
     return keyboard(
         ("Список воркеров", "workers:list:0"),
         ("Добавить по ID", "workers:add"),
-        ("Статистика", "workers:stats:0"),
+        ("\u0421\u043a\u0430\u0447\u0430\u0442\u044c \u0432\u044b\u0434\u0430\u0447\u0438 TXT", "workers:report"),
         ("Сбросить всю статистику", "workers:reset_ask:all"),
         ("Назад", "accounts:menu"),
     )
@@ -100,6 +100,33 @@ def admins_listing(config: Config):
         buttons.append((f"Убрать {user_id}", f"admins:remove_ask:{user_id}"))
     buttons.append(("Меню администраторов", "admins:menu"))
     return "\n".join(lines), keyboard(*buttons)
+
+
+def _delivery_worker_label(delivery) -> str:
+    name = " ".join(part for part in (delivery.first_name, delivery.last_name) if part)
+    return f"@{delivery.username}" if delivery.username else name or "\u0411\u0435\u0437 \u0438\u043c\u0435\u043d\u0438"
+
+
+def delivery_report_text(config: Config, user_id: int | None = None) -> str:
+    deliveries = list_worker_deliveries(config, user_id)
+    if not deliveries:
+        return ""
+    lines = ["\u0420\u0435\u0430\u043b\u044c\u043d\u043e \u0432\u044b\u0434\u0430\u043d\u043d\u044b\u0435 \u043d\u043e\u043c\u0435\u0440\u0430", ""]
+    for item in deliveries:
+        lines.append(f"{item.phone or '-'} | {_delivery_worker_label(item)} | ID {item.worker_id} | {item.delivered_at}")
+    return "\n".join(lines) + "\n"
+
+
+async def send_delivery_report(message: Message, config: Config, user_id: int | None = None) -> None:
+    report = delivery_report_text(config, user_id)
+    if not report:
+        await message.answer("\u0412 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0435 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0440\u0435\u0430\u043b\u044c\u043d\u043e \u0432\u044b\u0434\u0430\u043d\u043d\u044b\u0445 \u043d\u043e\u043c\u0435\u0440\u043e\u0432.")
+        return
+    filename = "issued_accounts.txt" if user_id is None else f"issued_accounts_{user_id}.txt"
+    await message.answer_document(
+        BufferedInputFile(report.encode("utf-8"), filename=filename),
+        caption="\u0421\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0440\u0435\u0430\u043b\u044c\u043d\u043e \u0432\u044b\u0434\u0430\u043d\u043d\u044b\u0445 \u043d\u043e\u043c\u0435\u0440\u043e\u0432.",
+    )
 
 
 def reset_prompt(target):
@@ -207,8 +234,7 @@ async def workers_command(message: Message, state: FSMContext):
 @router.message(Command("stats"))
 async def stats_command(message: Message, state: FSMContext, config: Config):
     await state.clear()
-    text, markup = listing(config, statistics=True)
-    await message.answer(text, reply_markup=markup, parse_mode="HTML")
+    await send_delivery_report(message, config)
 
 
 @router.message(Command("reset"))
@@ -258,6 +284,18 @@ async def add_worker(message: Message, state: FSMContext, config: Config, bot):
     )
 
 
+@router.callback_query(F.data == "workers:report")
+@router.callback_query(F.data.startswith("workers:report:"))
+async def download_delivery_report(callback: CallbackQuery, config: Config) -> None:
+    raw_user_id = callback.data.partition(":report:")[2]
+    user_id = _parse_telegram_user_id(raw_user_id) if raw_user_id else None
+    if raw_user_id and user_id is None:
+        await callback.answer("\u0412\u043e\u0440\u043a\u0435\u0440 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d.", show_alert=True)
+        return
+    await callback.answer()
+    await send_delivery_report(callback.message, config, user_id)
+
+
 @router.callback_query(F.data.startswith("workers:list:"))
 @router.callback_query(F.data.startswith("workers:stats:"))
 async def show_list(callback: CallbackQuery, config: Config, state: FSMContext):
@@ -279,16 +317,18 @@ async def show_worker(callback: CallbackQuery, config: Config):
     user_id = _parse_telegram_user_id(raw)
     worker = get_worker(config, user_id) if user_id else None
     if not worker:
-        await callback.answer("Воркер не найден.", show_alert=True)
+        await callback.answer("\u0412\u043e\u0440\u043a\u0435\u0440 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d.", show_alert=True)
         return
-    stats = worker_activity_stats(config).get(user_id, {})
+    delivered_count = len(list_worker_deliveries(config, user_id))
     await callback.answer()
     await callback.message.edit_text(
-        f"<b>{escape(worker_label(worker))}</b>\nID: <code>{user_id}</code>\n\n{stats_text(stats)}",
+        f"<b>{escape(worker_label(worker))}</b>\nID: <code>{user_id}</code>\n\n"
+        f"\u0420\u0435\u0430\u043b\u044c\u043d\u043e \u0432\u044b\u0434\u0430\u043d\u043e: <b>{delivered_count}</b>",
         reply_markup=keyboard(
-            ("Сбросить статистику", f"workers:reset_ask:{user_id}"),
-            ("Забрать доступ", f"workers:revoke_ask:{user_id}"),
-            ("Назад", "workers:list:0"),
+            ("\u0421\u043a\u0430\u0447\u0430\u0442\u044c \u0432\u044b\u0434\u0430\u0447\u0438 TXT", f"workers:report:{user_id}"),
+            ("\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0443", f"workers:reset_ask:{user_id}"),
+            ("\u0417\u0430\u0431\u0440\u0430\u0442\u044c \u0434\u043e\u0441\u0442\u0443\u043f", f"workers:revoke_ask:{user_id}"),
+            ("\u041d\u0430\u0437\u0430\u0434", "workers:list:0"),
         ), parse_mode="HTML",
     )
 
