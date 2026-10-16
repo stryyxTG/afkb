@@ -9,7 +9,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from tglol.config import Config, set_admin_ids
 from tglol.db import (
     clear_worker_activity, get_worker, list_workers, revoke_worker_access,
-    save_worker, worker_activity_stats, list_worker_deliveries,
+    save_worker, worker_activity_stats, list_worker_deliveries, issued_activity_count,
 )
 from tglol.handlers import _parse_telegram_user_id, _resolve_worker_identity
 from tglol.states import AddAdmin, AddWorker
@@ -67,6 +67,11 @@ def stats_text(stats):
 
 
 def listing(config: Config, page: int = 0, *, statistics: bool = False):
+    if statistics and not config.workers_enabled:
+        return (
+            f"<b>\u0412\u044b\u0434\u0430\u0447\u0438</b>\n\u0412\u044b\u0434\u0430\u043d\u043e \u0441 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0433\u043e \u0441\u0431\u0440\u043e\u0441\u0430: <b>{issued_activity_count(config)}</b>",
+            keyboard(("\u041c\u0435\u043d\u044e \u0432\u043e\u0440\u043a\u0435\u0440\u043e\u0432", "workers:menu")),
+        )
     workers = list_workers(config)
     pages = max(1, (len(workers) + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(0, min(page, pages - 1))
@@ -118,6 +123,13 @@ def delivery_report_text(config: Config, user_id: int | None = None) -> str:
 
 
 async def send_delivery_report(message: Message, config: Config, user_id: int | None = None) -> None:
+    if not config.workers_enabled:
+        count = issued_activity_count(config)
+        await message.answer(
+            f"\u0412\u044b\u0434\u0430\u043d\u043e \u0441 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0433\u043e \u0441\u0431\u0440\u043e\u0441\u0430: <b>{count}</b>",
+            parse_mode="HTML",
+        )
+        return
     report = delivery_report_text(config, user_id)
     if not report:
         await message.answer("\u0412 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0435 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0440\u0435\u0430\u043b\u044c\u043d\u043e \u0432\u044b\u0434\u0430\u043d\u043d\u044b\u0445 \u043d\u043e\u043c\u0435\u0440\u043e\u0432.")
@@ -320,12 +332,16 @@ async def show_worker(callback: CallbackQuery, config: Config):
         await callback.answer("\u0412\u043e\u0440\u043a\u0435\u0440 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d.", show_alert=True)
         return
     delivered_count = len(list_worker_deliveries(config, user_id))
+    statistic = (
+        f"\u0412\u044b\u0434\u0430\u043d\u043e \u0441 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0435\u0433\u043e \u0441\u0431\u0440\u043e\u0441\u0430: <b>{issued_activity_count(config)}</b>"
+        if not config.workers_enabled
+        else f"\u0420\u0435\u0430\u043b\u044c\u043d\u043e \u0432\u044b\u0434\u0430\u043d\u043e: <b>{delivered_count}</b>"
+    )
     await callback.answer()
     await callback.message.edit_text(
-        f"<b>{escape(worker_label(worker))}</b>\nID: <code>{user_id}</code>\n\n"
-        f"\u0420\u0435\u0430\u043b\u044c\u043d\u043e \u0432\u044b\u0434\u0430\u043d\u043e: <b>{delivered_count}</b>",
+        f"<b>{escape(worker_label(worker))}</b>\nID: <code>{user_id}</code>\n\n{statistic}",
         reply_markup=keyboard(
-            ("\u0421\u043a\u0430\u0447\u0430\u0442\u044c \u0432\u044b\u0434\u0430\u0447\u0438 TXT", f"workers:report:{user_id}"),
+            ("\u0421\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u0432\u044b\u0434\u0430\u0447", f"workers:report:{user_id}"),
             ("\u0421\u0431\u0440\u043e\u0441\u0438\u0442\u044c \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0443", f"workers:reset_ask:{user_id}"),
             ("\u0417\u0430\u0431\u0440\u0430\u0442\u044c \u0434\u043e\u0441\u0442\u0443\u043f", f"workers:revoke_ask:{user_id}"),
             ("\u041d\u0430\u0437\u0430\u0434", "workers:list:0"),

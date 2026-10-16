@@ -8,12 +8,13 @@ from datetime import datetime, timezone
 
 import test_workers
 from tglol.db import (
-    clear_worker_activity, get_account, get_worker, init_db, record_worker_delivery,
+    clear_worker_activity, get_account, get_worker, init_db, record_issue_delivery, record_worker_delivery,
     record_worker_request, revoke_worker_access, save_worker, worker_activity_stats, list_worker_deliveries,
+    issued_activity_count,
 )
 from tglol.handlers import AccessMiddleware, _give_out_accounts
 from tglol.worker_admin import (
-    AdminOnly, add_worker, delivery_report_text, listing, menu, router as worker_router,
+    AdminOnly, add_worker, delivery_report_text, listing, menu, send_delivery_report, router as worker_router,
 )
 
 
@@ -48,6 +49,32 @@ class WorkerAccessTests(unittest.IsolatedAsyncioTestCase):
         revoke_worker_access(self.config, 2)
         await middleware(handler, event, {"config": self.config, "event_from_user": event.from_user})
         self.assertEqual(handler.await_count, 2)
+
+    async def test_trigger_allows_any_chat_member_when_workers_disabled(self):
+        object.__setattr__(self.config, "workers_enabled", False)
+        middleware = AccessMiddleware()
+        handler = AsyncMock()
+        event = self.message(user_id=2)
+        await middleware(handler, event, {"config": self.config, "event_from_user": event.from_user})
+        handler.assert_awaited_once()
+
+    async def test_disabled_workers_do_not_record_worker_request(self):
+        object.__setattr__(self.config, "workers_enabled", False)
+        message = SimpleNamespace(from_user=SimpleNamespace(id=2), text="?? 10", answer=AsyncMock())
+        await _give_out_accounts(message, SimpleNamespace(), self.config)
+        self.assertEqual(worker_activity_stats(self.config), {})
+        message.answer.assert_awaited_once()
+
+    async def test_disabled_workers_report_only_global_issue_count(self):
+        account_id = self.add_account("40001")
+        record_issue_delivery(self.config, account_id)
+        object.__setattr__(self.config, "workers_enabled", False)
+        message = SimpleNamespace(answer=AsyncMock(), answer_document=AsyncMock())
+        await send_delivery_report(message, self.config)
+        self.assertIn("1", message.answer.await_args.args[0])
+        message.answer_document.assert_not_awaited()
+        clear_worker_activity(self.config)
+        self.assertEqual(issued_activity_count(self.config), 0)
 
     async def test_worker_cannot_use_admin_menu_or_other_chat(self):
         self.grant()

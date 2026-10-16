@@ -26,6 +26,7 @@ from tglol.db import (
     update_worker_identity,
     record_worker_request,
     record_worker_delivery,
+    record_issue_delivery,
     claim_accounts_for_worker,
     connect,
     count_accounts,
@@ -84,10 +85,8 @@ from tglol.telegram_service import (
 router = Router()
 logger = logging.getLogger(__name__)
 
-CODE_WATCH_SECONDS = 10 * 60
 CODE_WATCH_POLL_SECONDS = 10
 CODE_WATCH_DATE_GRACE_SECONDS = 120
-CODE_RETRY_WATCH_SECONDS = 2 * 60
 CODE_WATCH_MAX_CONCURRENT_POLLS = 5
 SCAN_CONCURRENCY = 5
 SCAN_ACCOUNT_TIMEOUT = 35
@@ -118,8 +117,8 @@ class AccessMiddleware(BaseMiddleware):
         if is_admin:
             return await handler(event, data)
 
-        is_trigger_text = isinstance(event, Message) and bool(
-            re.search(r"\bтг\b", text, flags=re.IGNORECASE)
+        is_trigger_text = isinstance(event, Message) and _contains_trigger_word(
+            text, config.trigger_word
         )
         is_worker_code_button = (
             isinstance(event, CallbackQuery)
@@ -127,12 +126,14 @@ class AccessMiddleware(BaseMiddleware):
             and (event.data.startswith("account:request_code:") or event.data.startswith("arc:"))
         )
         if is_trigger_chat and (is_trigger_text or is_worker_code_button):
+            if not config.workers_enabled:
+                return await handler(event, data)
             if get_worker(config, user.id) is None:
                 if isinstance(event, CallbackQuery):
-                    await event.answer("Доступ к аккаунтам закрыт.", show_alert=True)
+                    await event.answer("\u0414\u043e\u0441\u0442\u0443\u043f \u043a \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u0430\u043c \u0437\u0430\u043a\u0440\u044b\u0442.", show_alert=True)
                 return None
             update_worker_identity(
-                config, user.id, first_name=user.first_name or "Без имени",
+                config, user.id, first_name=user.first_name or "\u0411\u0435\u0437 \u0438\u043c\u0435\u043d\u0438",
                 last_name=user.last_name, username=user.username,
             )
             return await handler(event, data)
@@ -189,11 +190,33 @@ def _set_config_trigger_word(config: Config, word: str) -> None:
     object.__setattr__(config, "trigger_word", cleaned)
 
 
+def _set_config_trigger_max_accounts(config: Config, value: int) -> None:
+    _write_env_value("TRIGGER_MAX_ACCOUNTS", str(value))
+    object.__setattr__(config, "trigger_max_accounts", value)
+
+
+def _set_config_code_watch_minutes(config: Config, value: int) -> None:
+    _write_env_value("CODE_WATCH_MINUTES", str(value))
+    object.__setattr__(config, "code_watch_minutes", value)
+
+
+def _set_config_workers_enabled(config: Config, enabled: bool) -> None:
+    _write_env_value("WORKERS_ENABLED", "1" if enabled else "0")
+    object.__setattr__(config, "workers_enabled", enabled)
+
+
 def _trigger_menu_text(config: Config) -> str:
-    chat_text = "Чат не настроен." if config.trigger_chat_id is None else (
-        f"Текущий чат: <code>{config.trigger_chat_id}</code>"
+    chat_text = "\u0427\u0430\u0442 \u043d\u0435 \u043d\u0430\u0441\u0442\u0440\u043e\u0435\u043d." if config.trigger_chat_id is None else (
+        f"\u0422\u0435\u043a\u0443\u0449\u0438\u0439 \u0447\u0430\u0442: <code>{config.trigger_chat_id}</code>"
     )
-    return f"Триггер\n{chat_text}\nСлово: <code>{escape(config.trigger_word)}</code>"
+    workers_status = "\u0432\u043a\u043b\u044e\u0447\u0435\u043d\u044b" if config.workers_enabled else "\u043e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u044b"
+    return (
+        f"\u0422\u0440\u0438\u0433\u0433\u0435\u0440\n{chat_text}\n"
+        f"\u0421\u043b\u043e\u0432\u043e: <code>{escape(config.trigger_word)}</code>\n"
+        f"\u0417\u0430 \u0440\u0430\u0437: <b>{config.trigger_max_accounts}</b> \u0430\u043a\u043a.\n"
+        f"\u041f\u043e\u0438\u0441\u043a \u043a\u043e\u0434\u0430: <b>{config.code_watch_minutes}</b> \u043c\u0438\u043d.\n"
+        f"\u0412\u043e\u0440\u043a\u0435\u0440\u044b: <b>{workers_status}</b>"
+    )
 
 def _pages(total: int) -> int:
     return max(1, ceil(total / ACCOUNTS_PER_PAGE))
@@ -853,7 +876,7 @@ async def _watch_requested_account_codes(
     pending_ids = {account.id for account in accounts}
     code_received_ids: set[int] = set()
     poll_semaphore = asyncio.Semaphore(CODE_WATCH_MAX_CONCURRENT_POLLS)
-    deadline = time.monotonic() + CODE_WATCH_SECONDS
+    deadline = time.monotonic() + config.code_watch_minutes * 60
 
     async def poll_account(account):
         async with poll_semaphore:
@@ -896,6 +919,7 @@ async def _watch_requested_account_codes(
                     seen_keys.setdefault(account.id, set()).add(code_message.key)
                     pending_ids.discard(account.id)
                     code_received_ids.add(account.id)
+                    record_issue_delivery(config, current.id)
                     if worker_request_id is not None:
                         record_worker_delivery(config, worker_request_id, current)
                     _finalize_requested_account_stages(config, [account], code_received_ids)
@@ -919,7 +943,7 @@ def _contains_trigger_word(text: str, trigger_word: str) -> bool:
     return bool(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text or "", flags=re.IGNORECASE))
 
 
-def _parse_trigger_request_count(text: str, trigger_word: str = "\u0442\u0433") -> int:
+def _parse_trigger_request_count(text: str, trigger_word: str = "\u0442\u0433", max_accounts: int = 15) -> int:
     word = (trigger_word or "").strip()
     if not word:
         return 1
@@ -931,7 +955,7 @@ def _parse_trigger_request_count(text: str, trigger_word: str = "\u0442\u0433") 
     for pattern in patterns:
         match = re.search(pattern, text or "", flags=re.IGNORECASE)
         if match:
-            return max(1, min(int(match.group(1)), 15))
+            return max(1, min(int(match.group(1)), max_accounts))
     return 1
 
 
@@ -958,10 +982,16 @@ async def _notify_owners(bot: Bot, config: Config, *, reason: str, account_phone
 
 async def _give_out_accounts(message: Message, bot: Bot, config: Config) -> None:
     requester_id = message.from_user.id if message.from_user else 0
-    if requester_id not in config.admin_ids and get_worker(config, requester_id) is None:
+    is_worker = get_worker(config, requester_id) is not None
+    if requester_id not in config.admin_ids and config.workers_enabled and not is_worker:
         return
-    requested = _parse_trigger_request_count(message.text or "", config.trigger_word)
-    worker_request_id = record_worker_request(config, requester_id, requested)
+    requested = _parse_trigger_request_count(
+        message.text or "", config.trigger_word, config.trigger_max_accounts
+    )
+    worker_request_id = (
+        record_worker_request(config, requester_id, requested)
+        if config.workers_enabled and is_worker else None
+    )
     requested_count = requested
 
     claimed_accounts: list = []
@@ -1448,7 +1478,7 @@ async def show_trigger_menu(callback: CallbackQuery, state: FSMContext, config: 
     await state.clear()
     await callback.message.edit_text(
         _trigger_menu_text(config),
-        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None),
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None, workers_enabled=config.workers_enabled),
     )
     await callback.answer()
 
@@ -1458,7 +1488,7 @@ async def ask_trigger_chat(callback: CallbackQuery, state: FSMContext, config: C
     await state.set_state(TriggerState.waiting_chat_id)
     await callback.message.edit_text(
         "Отправь числовой ID чата для триггера. Для групп он обычно начинается с <code>-100</code>.",
-        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None),
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None, workers_enabled=config.workers_enabled),
     )
     await callback.answer()
 
@@ -1468,7 +1498,87 @@ async def ask_trigger_word(callback: CallbackQuery, state: FSMContext, config: C
     await state.set_state(TriggerState.waiting_word)
     await callback.message.edit_text(
         "Отправь одно триггерное слово длиной до 32 символов без пробелов.",
-        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None),
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None, workers_enabled=config.workers_enabled),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "trigger:max")
+async def ask_trigger_max_accounts(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    await state.set_state(TriggerState.waiting_max_accounts)
+    await callback.message.edit_text(
+        "\u041e\u0442\u043f\u0440\u0430\u0432\u044c \u0447\u0438\u0441\u043b\u043e \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u043e\u0432 \u0437\u0430 \u043e\u0434\u0438\u043d \u0437\u0430\u043f\u0440\u043e\u0441: \u043e\u0442 1 \u0434\u043e 100.",
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None, workers_enabled=config.workers_enabled),
+    )
+    await callback.answer()
+
+
+@router.message(TriggerState.waiting_max_accounts)
+async def save_trigger_max_accounts(message: Message, state: FSMContext, config: Config) -> None:
+    try:
+        value = int((message.text or "").strip())
+    except ValueError:
+        value = 0
+    if not 1 <= value <= 100:
+        await message.answer("\u041d\u0443\u0436\u043d\u043e \u0446\u0435\u043b\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043e\u0442 1 \u0434\u043e 100, \u0438\u043b\u0438 /cancel.")
+        return
+    try:
+        _set_config_trigger_max_accounts(config, value)
+    except OSError:
+        logger.exception("Cannot save trigger max accounts to .env")
+        await message.answer("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0443. \u041f\u0440\u043e\u0432\u0435\u0440\u044c \u043f\u0440\u0430\u0432\u0430 \u0431\u043e\u0442\u0430 \u043d\u0430 \u0444\u0430\u0439\u043b .env.")
+        return
+    await state.clear()
+    await message.answer(
+        f"\u041b\u0438\u043c\u0438\u0442 \u0441\u043e\u0445\u0440\u0430\u043d\u0451\u043d: <b>{value}</b>.",
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None, workers_enabled=config.workers_enabled),
+    )
+
+
+@router.callback_query(F.data == "trigger:minutes")
+async def ask_code_watch_minutes(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    await state.set_state(TriggerState.waiting_code_minutes)
+    await callback.message.edit_text(
+        "\u041e\u0442\u043f\u0440\u0430\u0432\u044c \u0432\u0440\u0435\u043c\u044f \u043f\u043e\u0438\u0441\u043a\u0430 \u043a\u043e\u0434\u0430 \u0432 \u043c\u0438\u043d\u0443\u0442\u0430\u0445: \u043e\u0442 1 \u0434\u043e 60.",
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None, workers_enabled=config.workers_enabled),
+    )
+    await callback.answer()
+
+
+@router.message(TriggerState.waiting_code_minutes)
+async def save_code_watch_minutes(message: Message, state: FSMContext, config: Config) -> None:
+    try:
+        value = int((message.text or "").strip())
+    except ValueError:
+        value = 0
+    if not 1 <= value <= 60:
+        await message.answer("\u041d\u0443\u0436\u043d\u043e \u0446\u0435\u043b\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043e\u0442 1 \u0434\u043e 60, \u0438\u043b\u0438 /cancel.")
+        return
+    try:
+        _set_config_code_watch_minutes(config, value)
+    except OSError:
+        logger.exception("Cannot save code watch minutes to .env")
+        await message.answer("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0443. \u041f\u0440\u043e\u0432\u0435\u0440\u044c \u043f\u0440\u0430\u0432\u0430 \u0431\u043e\u0442\u0430 \u043d\u0430 \u0444\u0430\u0439\u043b .env.")
+        return
+    await state.clear()
+    await message.answer(
+        f"\u0412\u0440\u0435\u043c\u044f \u043f\u043e\u0438\u0441\u043a\u0430 \u0441\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u043e: <b>{value}</b> \u043c\u0438\u043d.",
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None, workers_enabled=config.workers_enabled),
+    )
+
+
+@router.callback_query(F.data == "trigger:workers_toggle")
+async def toggle_workers(callback: CallbackQuery, state: FSMContext, config: Config) -> None:
+    await state.clear()
+    try:
+        _set_config_workers_enabled(config, not config.workers_enabled)
+    except OSError:
+        logger.exception("Cannot save workers enabled setting to .env")
+        await callback.answer("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0441\u043e\u0445\u0440\u0430\u043d\u0438\u0442\u044c \u043d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0443.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        _trigger_menu_text(config),
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None, workers_enabled=config.workers_enabled),
     )
     await callback.answer()
 
@@ -1488,7 +1598,7 @@ async def save_trigger_word(message: Message, state: FSMContext, config: Config)
     await state.clear()
     await message.answer(
         f"Триггерное слово сохранено: <code>{escape(word)}</code>.",
-        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None),
+        reply_markup=trigger_menu(has_trigger=config.trigger_chat_id is not None, workers_enabled=config.workers_enabled),
     )
 
 
@@ -1507,7 +1617,7 @@ async def save_trigger_chat(message: Message, state: FSMContext, config: Config)
     await state.clear()
     await message.answer(
         f"Чат-триггер сохранён: <code>{chat_id}</code>.",
-        reply_markup=trigger_menu(has_trigger=True),
+        reply_markup=trigger_menu(has_trigger=True, workers_enabled=config.workers_enabled),
     )
 
 
@@ -1516,7 +1626,7 @@ async def clear_trigger_chat(callback: CallbackQuery, state: FSMContext, config:
     await state.clear()
     _set_config_trigger_chat(config, None)
     await callback.message.edit_text(
-        _trigger_menu_text(config), reply_markup=trigger_menu(has_trigger=False)
+        _trigger_menu_text(config), reply_markup=trigger_menu(has_trigger=False, workers_enabled=config.workers_enabled)
     )
     await callback.answer("Триггер отключён.")
 
@@ -2144,14 +2254,16 @@ async def request_account_code(callback: CallbackQuery, config: Config, bot: Bot
         await callback.answer("\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d.", show_alert=True)
         return
 
-    await callback.answer("\u0418\u0449\u0443 \u043d\u043e\u0432\u043e\u0435 \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e 2 \u043c\u0438\u043d\u0443\u0442\u044b...")
+    await callback.answer(
+        f"\u0418\u0449\u0443 \u043d\u043e\u0432\u043e\u0435 \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e {config.code_watch_minutes} \u043c\u0438\u043d..."
+    )
     _active_retry_code_tasks.add(task_key)
     try:
         current, code_message, terminal = await _find_new_telegram_code_message(
             config,
             account,
             started_at=datetime.now(timezone.utc),
-            deadline=time.monotonic() + CODE_RETRY_WATCH_SECONDS,
+            deadline=time.monotonic() + config.code_watch_minutes * 60,
             seen_keys=set(),
         )
     finally:
@@ -2164,7 +2276,10 @@ async def request_account_code(callback: CallbackQuery, config: Config, bot: Bot
         await callback.message.answer("\u0410\u043a\u043a\u0430\u0443\u043d\u0442 \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d \u0434\u043b\u044f \u043f\u043e\u0438\u0441\u043a\u0430 \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u044b\u0445 \u0447\u0438\u0441\u0435\u043b.", reply_to_message_id=expected_reply_to_message_id)
         return
     if not code_message:
-        await callback.message.answer("\u041d\u043e\u0432\u043e\u0435 \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u0437\u0430 2 \u043c\u0438\u043d\u0443\u0442\u044b \u043d\u0435 \u043f\u0440\u0438\u0448\u043b\u043e.", reply_to_message_id=expected_reply_to_message_id)
+        await callback.message.answer(
+            f"\u041d\u043e\u0432\u043e\u0435 \u0441\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u0437\u0430 {config.code_watch_minutes} \u043c\u0438\u043d. \u043d\u0435 \u043f\u0440\u0438\u0448\u043b\u043e.",
+            reply_to_message_id=expected_reply_to_message_id,
+        )
         return
     try:
         await _send_code_delivery(
@@ -2175,6 +2290,7 @@ async def request_account_code(callback: CallbackQuery, config: Config, bot: Bot
             requester_user_id=expected_user_id,
             reply_to_message_id=expected_reply_to_message_id,
         )
+        record_issue_delivery(config, current.id)
     except Exception as exc:
         logger.warning("Cannot send retry Telegram code for account %s: %s", account_id, exc)
         await callback.message.answer(f"\u0421\u0435\u043a\u0440\u0435\u0442\u043d\u043e\u0435 \u0447\u0438\u0441\u043b\u043e \u043f\u0440\u0438\u0448\u043b\u043e, \u043d\u043e \u0431\u043e\u0442 \u043d\u0435 \u0441\u043c\u043e\u0433 \u0435\u0433\u043e \u043e\u0442\u043f\u0440\u0430\u0432\u0438\u0442\u044c: {escape(str(exc))}")

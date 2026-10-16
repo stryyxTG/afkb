@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, patch
 
 from tglol.handlers import (
     _contains_trigger_word, _parse_trigger_request_count, _parse_telegram_chat_id,
-    _set_config_trigger_chat, _set_config_trigger_word, save_trigger_chat,
+    _set_config_trigger_chat, _set_config_trigger_word, _set_config_trigger_max_accounts,
+    _set_config_code_watch_minutes, _set_config_workers_enabled, save_trigger_chat,
 )
 from tglol.keyboards import accounts_menu, trigger_menu
 import test_workers
@@ -34,6 +35,7 @@ class TriggerSettingsTests(unittest.TestCase):
         self.assertTrue(_contains_trigger_word("give 5", "give"))
         self.assertFalse(_contains_trigger_word("forgive 5", "give"))
         self.assertEqual(_parse_trigger_request_count("give 7", "give"), 7)
+        self.assertEqual(_parse_trigger_request_count("give 99", "give", 7), 7)
 
     def test_trigger_word_is_persisted_and_applied(self):
         with patch("tglol.handlers._write_env_value") as write_env:
@@ -41,12 +43,27 @@ class TriggerSettingsTests(unittest.TestCase):
         self.assertEqual(self.config.trigger_word, "give")
         write_env.assert_called_once_with("TRIGGER_WORD", "give")
 
+    def test_delivery_settings_are_persisted_and_applied(self):
+        with patch("tglol.handlers._write_env_value") as write_env:
+            _set_config_trigger_max_accounts(self.config, 7)
+            _set_config_code_watch_minutes(self.config, 12)
+            _set_config_workers_enabled(self.config, False)
+        self.assertEqual(self.config.trigger_max_accounts, 7)
+        self.assertEqual(self.config.code_watch_minutes, 12)
+        self.assertFalse(self.config.workers_enabled)
+        self.assertEqual(write_env.call_args_list[0].args, ("TRIGGER_MAX_ACCOUNTS", "7"))
+        self.assertEqual(write_env.call_args_list[1].args, ("CODE_WATCH_MINUTES", "12"))
+        self.assertEqual(write_env.call_args_list[2].args, ("WORKERS_ENABLED", "0"))
+
     def test_trigger_button_and_disable_action_are_present(self):
         main_callbacks = [button.callback_data for row in accounts_menu().inline_keyboard for button in row]
         self.assertIn("trigger:menu", main_callbacks)
         callbacks = [button.callback_data for row in trigger_menu(has_trigger=True).inline_keyboard for button in row]
         self.assertIn("trigger:clear", callbacks)
         self.assertIn("trigger:word", callbacks)
+        self.assertIn("trigger:max", callbacks)
+        self.assertIn("trigger:minutes", callbacks)
+        self.assertIn("trigger:workers_toggle", callbacks)
 
 
 class TriggerSettingsMessageTests(unittest.IsolatedAsyncioTestCase):

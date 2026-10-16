@@ -24,6 +24,9 @@ class Config:
     default_lang_pack: str
     trigger_chat_id: int | None
     trigger_word: str = "\u0442\u0433"
+    trigger_max_accounts: int = 15
+    code_watch_minutes: int = 10
+    workers_enabled: bool = True
 
 
 def _get_required(name: str) -> str:
@@ -97,6 +100,24 @@ def set_admin_ids(config: Config, admin_ids: set[int] | frozenset[int]) -> None:
     object.__setattr__(config, "admin_ids", normalized)
 
 
+def _get_bounded_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if minimum <= value <= maximum else default
+
+
+def _get_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _get_optional_int(name: str) -> int | None:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -125,4 +146,7 @@ def load_config() -> Config:
         default_lang_pack=os.getenv("DEFAULT_LANG_PACK", "tdesktop"),
         trigger_chat_id=_get_optional_int("TRIGGER_CHAT_ID"),
         trigger_word=os.getenv("TRIGGER_WORD", "\u0442\u0433").strip() or "\u0442\u0433",
+        trigger_max_accounts=_get_bounded_int("TRIGGER_MAX_ACCOUNTS", 15, minimum=1, maximum=100),
+        code_watch_minutes=_get_bounded_int("CODE_WATCH_MINUTES", 10, minimum=1, maximum=60),
+        workers_enabled=_get_bool("WORKERS_ENABLED", True),
     )

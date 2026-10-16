@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS worker_deliveries (
     UNIQUE(activity_id, account_id)
 );
 CREATE INDEX IF NOT EXISTS worker_deliveries_worker ON worker_deliveries(worker_id);
+CREATE TABLE IF NOT EXISTS issue_activity (
+    account_id INTEGER PRIMARY KEY,
+    delivered_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 """
 
@@ -705,6 +709,17 @@ def delete_accounts_by_stage(
         return int(cursor.rowcount or 0)
 
 
+def record_issue_delivery(config: Config, account_id: int) -> None:
+    with connect(config) as connection:
+        connection.execute("INSERT OR IGNORE INTO issue_activity (account_id) VALUES (?)", (account_id,))
+
+
+def issued_activity_count(config: Config) -> int:
+    with connect(config) as connection:
+        row = connection.execute("SELECT COUNT(*) AS total FROM issue_activity").fetchone()
+    return int(row["total"])
+
+
 def record_worker_request(config: Config, user_id: int, requested_count: int) -> int | None:
     """Record one accepted trigger, including requests when the stock is empty."""
     with connect(config) as connection:
@@ -775,6 +790,7 @@ def worker_activity_stats(config: Config) -> dict[int, dict[str, int]]:
 def clear_worker_activity(config: Config, user_id: int | None = None) -> None:
     with connect(config) as connection:
         if user_id is None:
+            connection.execute("DELETE FROM issue_activity")
             connection.execute("DELETE FROM worker_deliveries")
             connection.execute("DELETE FROM worker_activity")
         else:

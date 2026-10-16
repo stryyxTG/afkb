@@ -46,13 +46,17 @@ def proxy_menu(*, has_proxy: bool) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def trigger_menu(*, has_trigger: bool) -> InlineKeyboardMarkup:
+def trigger_menu(*, has_trigger: bool, workers_enabled: bool = True) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="Изменить чат", callback_data="trigger:set")
-    builder.button(text="Изменить слово", callback_data="trigger:word")
+    builder.button(text="\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u0447\u0430\u0442", callback_data="trigger:set")
+    builder.button(text="\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c \u0441\u043b\u043e\u0432\u043e", callback_data="trigger:word")
+    builder.button(text="\u041b\u0438\u043c\u0438\u0442 \u0430\u043a\u043a\u0430\u0443\u043d\u0442\u043e\u0432", callback_data="trigger:max")
+    builder.button(text="\u0412\u0440\u0435\u043c\u044f \u043f\u043e\u0438\u0441\u043a\u0430 \u043a\u043e\u0434\u0430", callback_data="trigger:minutes")
+    workers_label = "\u0412\u043e\u0440\u043a\u0435\u0440\u044b: \u0432\u043a\u043b" if workers_enabled else "\u0412\u043e\u0440\u043a\u0435\u0440\u044b: \u0432\u044b\u043a\u043b"
+    builder.button(text=workers_label, callback_data="trigger:workers_toggle")
     if has_trigger:
-        builder.button(text="Отключить триггер", callback_data="trigger:clear")
-    builder.button(text="Назад", callback_data="accounts:menu")
+        builder.button(text="\u041e\u0442\u043a\u043b\u044e\u0447\u0438\u0442\u044c \u0442\u0440\u0438\u0433\u0433\u0435\u0440", callback_data="trigger:clear")
+    builder.button(text="\u041d\u0430\u0437\u0430\u0434", callback_data="accounts:menu")
     builder.adjust(1)
     return builder.as_markup()
 

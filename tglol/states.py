@@ -29,3 +29,5 @@ class ProxyState(StatesGroup):
 class TriggerState(StatesGroup):
     waiting_chat_id = State()
     waiting_word = State()
+    waiting_max_accounts = State()
+    waiting_code_minutes = State()
