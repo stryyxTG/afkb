@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from pathlib import Path
 import re
@@ -506,7 +506,11 @@ async def _get_recent_code_messages_from_peers(
             except Exception as exc:
                 logger.info("Cannot read login codes from peer %s: %s", entity, exc)
                 continue
-        return result
+        return sorted(
+            result,
+            key=lambda item: (item.date or datetime.min.replace(tzinfo=timezone.utc), item.key),
+            reverse=True,
+        )
     finally:
         await client.disconnect()
 

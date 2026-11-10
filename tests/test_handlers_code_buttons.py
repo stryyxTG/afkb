@@ -3,8 +3,13 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-from tglol.handlers import _code_message_is_new, _send_code_delivery, _terminal_code_poll_status
+from tglol.handlers import (
+    _code_message_is_new, _poll_new_telegram_code_message, _send_code_delivery,
+    _terminal_code_poll_status,
+)
+from tglol.telegram_service import TelegramCodeMessage
 
 
 class FakeBot:
@@ -123,6 +128,26 @@ class CodeButtonTests(unittest.IsolatedAsyncioTestCase):
     def test_unauthorized_poll_error_is_terminal(self):
         self.assertEqual(_terminal_code_poll_status(RuntimeError("session is not authorized")), "unauthorized")
         self.assertIsNone(_terminal_code_poll_status(TimeoutError("temporary timeout")))
+
+    async def test_poll_uses_newest_code_from_last_five_messages(self):
+        started_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_path = Path(tmpdir) / "account.session"
+            session_path.write_bytes(b"session")
+            account = SimpleNamespace(id=7, session_path=str(session_path))
+            old = TelegramCodeMessage("11111", "telegram:10:0", started_at)
+            newest = TelegramCodeMessage("22222", "telegram:11:0", started_at + timedelta(seconds=1))
+            with patch("tglol.handlers.get_account", return_value=account), patch(
+                "tglol.handlers._account_connection_params", return_value=(1, "hash", {})
+            ), patch(
+                "tglol.handlers.get_recent_telegram_codes", new=AsyncMock(return_value=[old, newest])
+            ) as recent:
+                _current, code, terminal = await _poll_new_telegram_code_message(
+                    SimpleNamespace(), account, started_at=started_at, seen_keys=set()
+                )
+        self.assertFalse(terminal)
+        self.assertEqual(code.code, "22222")
+        self.assertEqual(recent.await_args.kwargs["limit"], 5)
 
 
 if __name__ == "__main__":

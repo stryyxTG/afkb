@@ -21,6 +21,14 @@ class TelegramCodeParserTests(unittest.TestCase):
     def test_accepts_russian_telegram_code(self):
         self.assertEqual(extract_login_codes("Код для входа в Telegram: 483921"), ["483921"])
 
+    def test_accepts_telegram_service_message_format(self):
+        text = (
+            "Код для входа в Telegram: 97479. Не давайте код никому, "
+            "даже если его требуют от имени Telegram!\n\n"
+            "❗ Этот код используется для входа в Ваш аккаунт в Telegram."
+        )
+        self.assertEqual(extract_login_codes(text), ["97479"])
+
     def test_returns_only_one_best_candidate(self):
         text = "Код входа: 483921. Номер обращения 778899."
         self.assertEqual(extract_login_codes(text), ["483921"])
