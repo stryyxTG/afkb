@@ -104,6 +104,16 @@ class TriggerCodeFinalizeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(account.registration_services, "imo,bebe")
         self.assertEqual(account.registration_service, "imo")
 
+    def test_restart_restores_processing_reg_account_to_reg(self):
+        account_id = self.add_account("61001", stage="reg", services="imo,bebe")
+        self.assertTrue(self.claim_processing(account_id))
+
+        init_db(self.config)
+
+        account = get_account(self.config, account_id)
+        self.assertEqual(account.account_stage, "reg")
+        self.assertEqual(account.registration_services, "imo,bebe")
+
 
 
     async def test_watcher_moves_only_delivered_account_to_issued(self):

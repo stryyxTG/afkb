@@ -144,11 +144,6 @@ def init_db(config: Config) -> None:
     with connect(config) as connection:
         _migrate_legacy_workers_table(connection)
         connection.executescript(SCHEMA)
-        # A restart cancels in-memory code watchers, so their reservations must not persist.
-        connection.execute(
-            "UPDATE accounts SET account_stage = 'nereg', registration_service = NULL, "
-            "registration_services = NULL WHERE account_stage = 'processing'"
-        )
         _ensure_column(connection, "accounts", "account_stage", "TEXT NOT NULL DEFAULT 'nereg'")
         _ensure_column(connection, "accounts", "registration_service", "TEXT")
         _ensure_column(connection, "accounts", "registration_services", "TEXT")
@@ -159,6 +154,17 @@ def init_db(config: Config) -> None:
             WHERE registration_services IS NULL
               AND registration_service IS NOT NULL
               AND registration_service != ''
+            """
+        )
+        # A restart cancels in-memory code watchers, so their reservations must not persist.
+        connection.execute(
+            """
+            UPDATE accounts
+            SET account_stage = CASE
+                WHEN coalesce(nullif(registration_services, ''), registration_service, '') != '' THEN 'reg'
+                ELSE 'nereg'
+            END
+            WHERE account_stage = 'processing'
             """
         )
 
@@ -376,8 +382,7 @@ def claim_accounts_for_worker(
         connection.execute(
             f"""
             UPDATE accounts
-            SET account_stage = ?, registration_service = NULL,
-                registration_services = NULL, updated_at = datetime('now')
+            SET account_stage = ?, updated_at = datetime('now')
             WHERE id IN ({claimed_placeholders}) AND account_stage NOT IN ('issued', 'processing') AND status = 'active'
             """,
             [reserve_stage, *claimed_ids],
