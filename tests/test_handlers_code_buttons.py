@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from tglol.handlers import (
-    _code_message_is_new, _poll_new_telegram_code_message, _send_code_delivery,
+    _code_message_is_new, _poll_new_telegram_code_message, _send_account_code, _send_code_delivery,
     _terminal_code_poll_status,
 )
 from tglol.telegram_service import TelegramCodeMessage
@@ -148,6 +148,31 @@ class CodeButtonTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(terminal)
         self.assertEqual(code.code, "22222")
         self.assertEqual(recent.await_args.kwargs["limit"], 5)
+
+    async def test_admin_card_code_includes_twofa(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_path = Path(tmpdir) / "account.session"
+            json_path = Path(tmpdir) / "account.json"
+            session_path.write_bytes(b"session")
+            json_path.write_text('{"twoFA":"pass-123"}', encoding="utf-8")
+            account = SimpleNamespace(
+                id=7, phone="+12536173293", session_path=str(session_path),
+                twofa_password=None, json_original_path=str(json_path), json_effective_path=str(json_path),
+            )
+            callback = SimpleNamespace(
+                data="account:telegram_code:7",
+                message=SimpleNamespace(answer=AsyncMock()),
+                answer=AsyncMock(),
+            )
+            with patch("tglol.handlers.get_account", return_value=account), patch(
+                "tglol.handlers._account_connection_params", return_value=(1, "hash", {})
+            ), patch("tglol.handlers.get_latest_telegram_code", new=AsyncMock(return_value="97479")):
+                await _send_account_code(callback, SimpleNamespace())
+        text = callback.message.answer.await_args.args[0]
+        self.assertIn("97479", text)
+        self.assertIn("12536173293", text)
+        self.assertIn("2FA", text)
+        self.assertIn("pass-123", text)
 
 
 if __name__ == "__main__":

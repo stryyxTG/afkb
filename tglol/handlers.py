@@ -2225,7 +2225,14 @@ async def _send_account_code(callback: CallbackQuery, config: Config) -> None:
         await callback.answer()
         return
 
-    await callback.message.answer(f"{title}: <code>{escape(code)}</code>")
+    lines = [
+        f"{title}: <code>{escape(code)}</code>",
+        f"Номер: <code>{escape(_phone_without_plus(account.phone))}</code>",
+    ]
+    twofa = _account_twofa_password(account)
+    if twofa:
+        lines.append(f"2FA: <code>{escape(twofa)}</code>")
+    await callback.message.answer("\n".join(lines))
     await callback.answer("Секретное число найдено.")
 
 
