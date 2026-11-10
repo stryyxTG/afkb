@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from tglol.config import Config
@@ -34,10 +35,27 @@ def pick_api(data: dict[str, Any] | None, config: Config) -> tuple[int, str]:
 def pick_twofa(data: dict[str, Any] | None) -> str | None:
     if not data:
         return None
-    for key in ("twoFA", "twofa_password", "twofa", "two_fa", "password"):
-        value = data.get(key)
-        if value not in (None, ""):
-            return str(value)
+
+    def value_from(mapping: dict[str, Any], *, allow_plain_password: bool) -> str | None:
+        for key, value in mapping.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+            if normalized in {
+                "twofa", "2fa", "twofactor", "twofapassword", "2fapassword",
+                "twofactorpassword", "password2fa", "cloudpassword",
+            } or (allow_plain_password and normalized == "password"):
+                if value not in (None, ""):
+                    return str(value)
+        return None
+
+    value = value_from(data, allow_plain_password=True)
+    if value is not None:
+        return value
+    for key in ("auth", "account", "telegram", "settings"):
+        nested = data.get(key)
+        if isinstance(nested, dict):
+            value = value_from(nested, allow_plain_password=True)
+            if value is not None:
+                return value
     return None
 
 

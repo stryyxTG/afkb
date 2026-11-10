@@ -3,7 +3,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 from tglol.config import Config
-from tglol.json_utils import pick_api, runtime_from_json
+from tglol.json_utils import pick_api, pick_twofa, runtime_from_json
 from tglol.telegram_service import client_for
 
 
@@ -44,6 +44,12 @@ class JsonUtilsTests(unittest.TestCase):
     def test_pick_api_falls_back_to_api_credentials_then_config(self):
         self.assertEqual(pick_api({"api_id": 8, "api_hash": "api_hash"}, self.config()), (8, "api_hash"))
         self.assertEqual(pick_api({"app_id": "", "app_hash": ""}, self.config()), (2040, "config_hash"))
+
+    def test_pick_twofa_accepts_common_exporter_spellings(self):
+        self.assertEqual(pick_twofa({"twoFA": "first"}), "first")
+        self.assertEqual(pick_twofa({"2FA": "second"}), "second")
+        self.assertEqual(pick_twofa({"two_factor_password": "third"}), "third")
+        self.assertEqual(pick_twofa({"auth": {"cloud_password": "fourth"}}), "fourth")
 
     def test_runtime_uses_json_connection_profile(self):
         runtime = runtime_from_json(

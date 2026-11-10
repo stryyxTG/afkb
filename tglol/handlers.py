@@ -733,6 +733,13 @@ async def _send_code_delivery(
     phone = _phone_without_plus(account.phone)
     lines = [escape(phone), f"<code>{escape(code)}</code>"]
     twofa = _account_twofa_password(account)
+    logger.info(
+        "Delivering Telegram code account=%s chat=%s requester=%s twofa_present=%s",
+        account.id,
+        chat_id,
+        requester_user_id,
+        bool(twofa),
+    )
     if twofa:
         lines.append(f"2FA: <code>{escape(twofa)}</code>")
     markup = InlineKeyboardMarkup(
