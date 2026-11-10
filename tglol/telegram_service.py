@@ -18,7 +18,10 @@ from tglol.session_compat import telethon_compatible_session_path
 
 
 CODE_RE = re.compile(r"(?<!\d)(\d[\d\s-]{2,14}\d)(?!\d)")
-CODE_CONTEXT_RE = re.compile(r"\b(code|otp|passcode|парол|код|подтверж)\b", re.IGNORECASE)
+CODE_CONTEXT_RE = re.compile(
+    r"\b(code|otp|passcode|login\s+code|verification|парол\w*|код\w*|подтверж\w*|вход\w*)\b",
+    re.IGNORECASE,
+)
 TELEGRAM_CODE_PEERS = (777000, "Telegram")
 logger = logging.getLogger(__name__)
 
@@ -371,16 +374,54 @@ def user_fields(user: User | None) -> dict[str, Any]:
 
 
 def extract_login_codes(text: str, *, require_context: bool = True) -> list[str]:
-    candidates: list[str] = []
-    for match in CODE_RE.finditer(text or ""):
+    """Return the most likely login code from one Telegram service message.
+
+    Telegram messages may contain unrelated numbers such as years, device names or
+    support references.  A message-wide context check used to accept those numbers
+    and the watcher could publish the first one instead of the login code.
+    """
+    source = text or ""
+    candidates: list[tuple[int, int, str]] = []
+    for match in CODE_RE.finditer(source):
         code = re.sub(r"\D+", "", match.group(1))
         if 4 <= len(code) <= 8:
-            candidates.append(code)
+            # Telegram login codes are five or more digits.  Four-digit calendar
+            # years in a footer must never be mistaken for an authentication code.
+            if len(code) == 4 and 1900 <= int(code) <= 2100:
+                continue
+            candidates.append((match.start(), match.end(), code))
     if not candidates:
         return []
-    if not require_context or CODE_CONTEXT_RE.search(text or ""):
-        return candidates
-    return []
+
+    scored: list[tuple[int, int, str]] = []
+    for start, end, code in candidates:
+        # The actual code is normally next to "login code" / "код".  Inspect a
+        # local window instead of accepting a context word elsewhere in the text.
+        before = source[max(0, start - 72):start]
+        after = source[end:min(len(source), end + 72)]
+        nearby_context = bool(CODE_CONTEXT_RE.search(before) or CODE_CONTEXT_RE.search(after))
+        if require_context and not nearby_context:
+            continue
+
+        score = 0
+        if nearby_context:
+            score += 100
+        if len(code) in {5, 6}:
+            score += 10
+        # Prefer a code following an explicit label, then a code immediately
+        # followed by the label (both official Telegram message layouts exist).
+        if re.search(r"(?:code|otp|passcode|код\w*|парол\w*)[^\d]{0,24}$", before, re.IGNORECASE):
+            score += 30
+        if re.match(r"^\s*(?:is\s+your\s+)?(?:code|otp|passcode|код\w*|парол\w*)", after, re.IGNORECASE):
+            score += 20
+        scored.append((score, start, code))
+
+    if not scored:
+        return []
+    # Only one code is returned for a message.  Sending several candidates from a
+    # single message lets a footer/year win before the real login code.
+    _score, _start, code = max(scored, key=lambda item: (item[0], -item[1]))
+    return [code]
 
 
 def _dialog_name_key(value: str | None) -> str:
@@ -415,7 +456,9 @@ async def _resolve_code_entities(
 
     target_ids = {peer for peer in peers if isinstance(peer, int)}
     target_names = {_dialog_name_key(name) for name in dialog_names}
-    if target_ids or target_names:
+    # get_entity(777000) normally succeeds.  Enumerating 100 dialogs on every
+    # ten-second poll is expensive and was the main avoidable source of delay.
+    if not entities and (target_ids or target_names):
         async for dialog in client.iter_dialogs(limit=100):
             entity = dialog.entity
             names = {

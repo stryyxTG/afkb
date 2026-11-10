@@ -110,13 +110,13 @@ class CodeButtonTests(unittest.IsolatedAsyncioTestCase):
 
     def test_code_message_accepts_small_clock_skew(self):
         started_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-        message = SimpleNamespace(date=started_at - timedelta(seconds=90))
+        message = SimpleNamespace(date=started_at - timedelta(seconds=10))
 
         self.assertTrue(_code_message_is_new(message, started_at))
 
     def test_code_message_rejects_old_message_outside_grace_window(self):
         started_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-        message = SimpleNamespace(date=started_at - timedelta(minutes=5))
+        message = SimpleNamespace(date=started_at - timedelta(seconds=30))
 
         self.assertFalse(_code_message_is_new(message, started_at))
 

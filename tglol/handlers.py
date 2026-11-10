@@ -86,7 +86,9 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 CODE_WATCH_POLL_SECONDS = 10
-CODE_WATCH_DATE_GRACE_SECONDS = 120
+# The watcher starts immediately after the number is sent.  A wide grace window
+# can replay an earlier Telegram login code during a later request.
+CODE_WATCH_DATE_GRACE_SECONDS = 15
 CODE_WATCH_MAX_CONCURRENT_POLLS = 5
 SCAN_CONCURRENCY = 5
 SCAN_ACCOUNT_TIMEOUT = 35
@@ -790,7 +792,7 @@ async def _poll_new_telegram_code_message(
             update_account_status(config, current.id, "missing_file")
             return current, None, True
         api_id, api_hash, runtime = _account_connection_params(current, config)
-        messages = await get_recent_telegram_codes(session_path, api_id, api_hash, runtime, limit=50)
+        messages = await get_recent_telegram_codes(session_path, api_id, api_hash, runtime, limit=10)
     except Exception as exc:
         terminal_status = _terminal_code_poll_status(exc)
         if terminal_status:
