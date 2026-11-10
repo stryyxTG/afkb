@@ -92,7 +92,7 @@ class TriggerCodeFinalizeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(get_account(self.config, first_id).account_stage, "issued")
         self.assertEqual(get_account(self.config, second_id).account_stage, "nereg")
 
-    def test_timeout_restore_preserves_reg_service_metadata(self):
+    def test_timeout_returns_legacy_reg_account_to_clean(self):
         account_id = self.add_account("60001", stage="reg", services="imo,bebe")
         claimed = self.claim_processing(account_id)
 
@@ -100,19 +100,8 @@ class TriggerCodeFinalizeTests(unittest.IsolatedAsyncioTestCase):
         account = get_account(self.config, account_id)
 
         self.assertEqual(result, {"issued": 0, "restored": 1, "skipped": 0})
-        self.assertEqual(account.account_stage, "reg")
-        self.assertEqual(account.registration_services, "imo,bebe")
-        self.assertEqual(account.registration_service, "imo")
-
-    def test_restart_restores_processing_reg_account_to_reg(self):
-        account_id = self.add_account("61001", stage="reg", services="imo,bebe")
-        self.assertTrue(self.claim_processing(account_id))
-
-        init_db(self.config)
-
-        account = get_account(self.config, account_id)
-        self.assertEqual(account.account_stage, "reg")
-        self.assertEqual(account.registration_services, "imo,bebe")
+        self.assertEqual(account.account_stage, "nereg")
+        self.assertIsNone(account.registration_services)
 
 
 

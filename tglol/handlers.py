@@ -850,11 +850,6 @@ async def _find_new_telegram_code_message(
 
 
 def _restore_clean_stage_after_code_timeout(config: Config, account) -> str:
-    if account.account_stage == "reg":
-        services = services_from_storage(account.registration_services, account.registration_service)
-        if services:
-            set_account_stage(config, account.id, "reg", registration_services=services)
-            return "reg"
     set_account_stage(config, account.id, "nereg")
     return "nereg"
 

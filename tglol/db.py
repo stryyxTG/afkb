@@ -160,10 +160,9 @@ def init_db(config: Config) -> None:
         connection.execute(
             """
             UPDATE accounts
-            SET account_stage = CASE
-                WHEN coalesce(nullif(registration_services, ''), registration_service, '') != '' THEN 'reg'
-                ELSE 'nereg'
-            END
+            SET account_stage = 'nereg',
+                registration_service = NULL,
+                registration_services = NULL
             WHERE account_stage = 'processing'
             """
         )
@@ -382,7 +381,8 @@ def claim_accounts_for_worker(
         connection.execute(
             f"""
             UPDATE accounts
-            SET account_stage = ?, updated_at = datetime('now')
+            SET account_stage = ?, registration_service = NULL,
+                registration_services = NULL, updated_at = datetime('now')
             WHERE id IN ({claimed_placeholders}) AND account_stage NOT IN ('issued', 'processing') AND status = 'active'
             """,
             [reserve_stage, *claimed_ids],
