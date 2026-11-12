@@ -111,6 +111,7 @@ class TriggerCodeFinalizeTests(unittest.IsolatedAsyncioTestCase):
         claimed = self.claim_processing(first_id, second_id)
         first, second = claimed
         delivered = []
+        clock = [0.0]
 
         async def fake_poll(config, account, *, started_at, seen_keys=None):
             if account.id == first.id:
@@ -120,8 +121,13 @@ class TriggerCodeFinalizeTests(unittest.IsolatedAsyncioTestCase):
         async def fake_send(*args, **kwargs):
             delivered.append(kwargs["account"].id)
 
+        async def fake_sleep(seconds):
+            clock[0] += 601.0
+
         with patch("tglol.handlers._poll_new_telegram_code_message", side_effect=fake_poll), patch(
             "tglol.handlers._send_code_delivery", side_effect=fake_send
+        ), patch("tglol.handlers.asyncio.sleep", side_effect=fake_sleep), patch(
+            "tglol.handlers.time", SimpleNamespace(monotonic=lambda: clock[0])
         ):
             await _watch_requested_account_codes(
                 SimpleNamespace(),
@@ -136,6 +142,32 @@ class TriggerCodeFinalizeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(delivered, [first_id])
         self.assertEqual(get_account(self.config, first_id).account_stage, "issued")
         self.assertEqual(get_account(self.config, second_id).account_stage, "nereg")
+
+    async def test_terminal_poll_error_keeps_account_reserved_until_timeout(self):
+        account_id = self.add_account("70501")
+        claimed = self.claim_processing(account_id)
+        clock = [0.0]
+        poll_calls = []
+
+        async def fake_poll(config, account, *, started_at, seen_keys=None):
+            poll_calls.append(account.id)
+            return account, None, True
+
+        async def fake_sleep(seconds):
+            self.assertEqual(get_account(self.config, account_id).account_stage, "processing")
+            clock[0] = 601.0
+
+        with patch("tglol.handlers._poll_new_telegram_code_message", side_effect=fake_poll), patch(
+            "tglol.handlers.asyncio.sleep", side_effect=fake_sleep
+        ), patch("tglol.handlers.time", SimpleNamespace(monotonic=lambda: clock[0])):
+            await _watch_requested_account_codes(
+                SimpleNamespace(), self.config, claimed,
+                chat_id=-100123, requester_user_id=1, reply_to_message_id=10,
+                started_at=datetime.now(timezone.utc),
+            )
+
+        self.assertEqual(poll_calls, [account_id])
+        self.assertEqual(get_account(self.config, account_id).account_stage, "nereg")
 
 
     async def test_failed_number_delivery_restores_processing_accounts(self):

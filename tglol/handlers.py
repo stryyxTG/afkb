@@ -882,6 +882,11 @@ async def _watch_requested_account_codes(
 ) -> None:
     seen_keys: dict[int, set[str]] = {account.id: set() for account in accounts}
     pending_ids = {account.id for account in accounts}
+    # A terminal read failure means that this account cannot produce a code in
+    # the current request.  It must nevertheless keep its reservation until
+    # the request timeout; otherwise a whole batch can jump back to Clean in
+    # seconds when every account has a temporary/bad session problem.
+    terminal_ids: set[int] = set()
     code_received_ids: set[int] = set()
     poll_semaphore = asyncio.Semaphore(CODE_WATCH_MAX_CONCURRENT_POLLS)
     deadline = time.monotonic() + config.code_watch_minutes * 60
@@ -898,10 +903,16 @@ async def _watch_requested_account_codes(
 
     try:
         while pending_ids and time.monotonic() < deadline:
-            pending_accounts = [account for account in accounts if account.id in pending_ids]
-            results = await asyncio.gather(
-                *(poll_account(account) for account in pending_accounts),
-                return_exceptions=True,
+            pending_accounts = [
+                account for account in accounts
+                if account.id in pending_ids and account.id not in terminal_ids
+            ]
+            results = (
+                await asyncio.gather(
+                    *(poll_account(account) for account in pending_accounts),
+                    return_exceptions=True,
+                )
+                if pending_accounts else []
             )
             for result in results:
                 if isinstance(result, Exception):
@@ -911,7 +922,7 @@ async def _watch_requested_account_codes(
                 if account.id not in pending_ids:
                     continue
                 if terminal:
-                    pending_ids.discard(account.id)
+                    terminal_ids.add(account.id)
                     continue
                 if not current or not code_message:
                     continue
@@ -934,7 +945,7 @@ async def _watch_requested_account_codes(
                 except Exception as exc:
                     logger.warning("Cannot send Telegram code for account %s: %s", account.id, exc)
             if pending_ids and time.monotonic() < deadline:
-                await asyncio.sleep(CODE_WATCH_POLL_SECONDS)
+                await asyncio.sleep(min(CODE_WATCH_POLL_SECONDS, max(0, deadline - time.monotonic())))
     finally:
         stage_result = _finalize_requested_account_stages(config, accounts, code_received_ids)
         logger.info(
