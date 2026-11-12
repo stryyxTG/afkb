@@ -915,8 +915,13 @@ async def _watch_requested_account_codes(
                 if pending_accounts else []
             )
             for result in results:
-                if isinstance(result, Exception):
-                    logger.warning("Code watcher poll task failed: %s", result)
+                # asyncio.CancelledError derives from BaseException on current
+                # Python versions.  asyncio.gather(return_exceptions=True)
+                # returns it as a value, so checking only Exception used to
+                # unpack it below, crash the watcher and restore the whole
+                # batch immediately.
+                if isinstance(result, BaseException):
+                    logger.warning("Code watcher poll task failed: %s", type(result).__name__)
                     continue
                 account, current, code_message, terminal = result
                 if account.id not in pending_ids:

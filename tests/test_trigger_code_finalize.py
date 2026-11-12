@@ -1,3 +1,4 @@
+import asyncio
 import shutil
 import tempfile
 import unittest
@@ -152,6 +153,32 @@ class TriggerCodeFinalizeTests(unittest.IsolatedAsyncioTestCase):
         async def fake_poll(config, account, *, started_at, seen_keys=None):
             poll_calls.append(account.id)
             return account, None, True
+
+        async def fake_sleep(seconds):
+            self.assertEqual(get_account(self.config, account_id).account_stage, "processing")
+            clock[0] = 601.0
+
+        with patch("tglol.handlers._poll_new_telegram_code_message", side_effect=fake_poll), patch(
+            "tglol.handlers.asyncio.sleep", side_effect=fake_sleep
+        ), patch("tglol.handlers.time", SimpleNamespace(monotonic=lambda: clock[0])):
+            await _watch_requested_account_codes(
+                SimpleNamespace(), self.config, claimed,
+                chat_id=-100123, requester_user_id=1, reply_to_message_id=10,
+                started_at=datetime.now(timezone.utc),
+            )
+
+        self.assertEqual(poll_calls, [account_id])
+        self.assertEqual(get_account(self.config, account_id).account_stage, "nereg")
+
+    async def test_cancelled_poll_does_not_finalize_batch_early(self):
+        account_id = self.add_account("70601")
+        claimed = self.claim_processing(account_id)
+        clock = [0.0]
+        poll_calls = []
+
+        async def fake_poll(config, account, *, started_at, seen_keys=None):
+            poll_calls.append(account.id)
+            raise asyncio.CancelledError()
 
         async def fake_sleep(seconds):
             self.assertEqual(get_account(self.config, account_id).account_stage, "processing")
