@@ -95,5 +95,21 @@ class AccountClaimTests(unittest.TestCase):
         self.assertEqual(claimed, [])
         self.assertEqual(get_account(self.config, account_id).account_stage, "nereg")
 
+    def test_overlapping_claims_cannot_take_the_same_clean_account(self):
+        first_id = self.add_account("60001")
+        second_id = self.add_account("60002")
+
+        first_claim = claim_accounts_for_worker(
+            self.config, [first_id, second_id], worker_id=None, reserve_stage="processing"
+        )
+        second_claim = claim_accounts_for_worker(
+            self.config, [first_id, second_id], worker_id=None, reserve_stage="processing"
+        )
+
+        self.assertEqual([account.id for account in first_claim], [first_id, second_id])
+        self.assertEqual(second_claim, [])
+        self.assertEqual(get_account(self.config, first_id).account_stage, "processing")
+        self.assertEqual(get_account(self.config, second_id).account_stage, "processing")
+
 if __name__ == "__main__":
     unittest.main()

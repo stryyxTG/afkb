@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from html import escape
 from math import ceil
 from pathlib import Path
@@ -86,9 +86,6 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 CODE_WATCH_POLL_SECONDS = 3
-# The watcher starts immediately after the number is sent.  A wide grace window
-# can replay an earlier Telegram login code during a later request.
-CODE_WATCH_DATE_GRACE_SECONDS = 15
 CODE_WATCH_MAX_CONCURRENT_POLLS = 5
 SCAN_CONCURRENCY = 5
 SCAN_ACCOUNT_TIMEOUT = 35
@@ -710,7 +707,11 @@ def _code_message_is_new(message, started_at: datetime) -> bool:
         return True
     if message_date.tzinfo is None:
         message_date = message_date.replace(tzinfo=timezone.utc)
-    return message_date >= started_at - timedelta(seconds=CODE_WATCH_DATE_GRACE_SECONDS)
+    # A code belongs to this request only if Telegram timestamped it no earlier
+    # than the request itself.  This deliberately has no backwards grace:
+    # accepting old messages makes a simultaneous second request mark a clean
+    # account as issued before its own code arrives.
+    return message_date >= started_at
 
 
 

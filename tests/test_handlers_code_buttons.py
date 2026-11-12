@@ -113,9 +113,15 @@ class CodeButtonTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("2FA", text)
         self.assertIn("pass-123", text)
 
-    def test_code_message_accepts_small_clock_skew(self):
+    def test_code_message_rejects_message_before_request(self):
         started_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
         message = SimpleNamespace(date=started_at - timedelta(seconds=10))
+
+        self.assertFalse(_code_message_is_new(message, started_at))
+
+    def test_code_message_accepts_message_at_request_start(self):
+        started_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        message = SimpleNamespace(date=started_at)
 
         self.assertTrue(_code_message_is_new(message, started_at))
 
