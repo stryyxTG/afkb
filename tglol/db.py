@@ -357,11 +357,40 @@ def claim_accounts_for_worker(
         if unique_ids and allowed > 0:
             placeholders = ",".join("?" for _ in unique_ids)
             rows = connection.execute(
-                f"SELECT * FROM accounts WHERE id IN ({placeholders}) AND account_stage NOT IN ('issued', 'processing') AND status = 'active'",
+                f"""
+                SELECT candidate.*
+                FROM accounts AS candidate
+                WHERE candidate.id IN ({placeholders})
+                  AND candidate.account_stage NOT IN ('issued', 'processing')
+                  AND candidate.status = 'active'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM accounts AS reserved
+                      WHERE reserved.phone = candidate.phone
+                        AND reserved.id != candidate.id
+                        AND reserved.account_stage IN ('issued', 'processing')
+                  )
+                """,
                 unique_ids,
             ).fetchall()
         by_id = {int(row["id"]): row for row in rows}
-        claimed_ids = [account_id for account_id in unique_ids if account_id in by_id][:allowed]
+        # A phone can be imported more than once under different account IDs.
+        # Reserve at most one row for a phone in a request, then let the stage
+        # guard above block every duplicate row while that phone is in use.
+        claimed_ids: list[int] = []
+        claimed_phones: set[str] = set()
+        for account_id in unique_ids:
+            row = by_id.get(account_id)
+            if not row:
+                continue
+            phone = str(row["phone"] or "")
+            if phone and phone in claimed_phones:
+                continue
+            claimed_ids.append(account_id)
+            if phone:
+                claimed_phones.add(phone)
+            if len(claimed_ids) >= allowed:
+                break
 
         request_id: int | None = None
         if worker_id is not None:

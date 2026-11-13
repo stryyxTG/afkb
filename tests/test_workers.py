@@ -111,5 +111,21 @@ class AccountClaimTests(unittest.TestCase):
         self.assertEqual(get_account(self.config, first_id).account_stage, "processing")
         self.assertEqual(get_account(self.config, second_id).account_stage, "processing")
 
+    def test_duplicate_phone_cannot_be_claimed_twice(self):
+        first_id = self.add_account("70001")
+        duplicate_id = self.add_account("70001")
+
+        first_claim = claim_accounts_for_worker(
+            self.config, [first_id, duplicate_id], worker_id=None, reserve_stage="processing"
+        )
+        second_claim = claim_accounts_for_worker(
+            self.config, [duplicate_id], worker_id=None, reserve_stage="processing"
+        )
+
+        self.assertEqual([account.id for account in first_claim], [first_id])
+        self.assertEqual(second_claim, [])
+        self.assertEqual(get_account(self.config, first_id).account_stage, "processing")
+        self.assertEqual(get_account(self.config, duplicate_id).account_stage, "nereg")
+
 if __name__ == "__main__":
     unittest.main()
