@@ -140,7 +140,90 @@ def connect(config: Config) -> sqlite3.Connection:
     return connection
 
 
+def _phone_key(phone: str | None) -> str | None:
+    digits = "".join(char for char in str(phone or "") if char.isdigit())
+    return digits or None
+
+
+def _connect_issue_lock_db(config: Config) -> sqlite3.Connection | None:
+    path = config.issuance_lock_db_path
+    if path is None:
+        return None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS phone_issue_locks (
+            phone_key TEXT PRIMARY KEY,
+            state TEXT NOT NULL CHECK(state IN ('processing', 'issued')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    return connection
+
+
+def _reserve_phone_keys(config: Config, phones: list[str | None]) -> set[str]:
+    """Reserve phone numbers across every bot configured with the same lock DB."""
+    keys = list(dict.fromkeys(key for phone in phones if (key := _phone_key(phone))))
+    if not keys:
+        return set()
+    connection = _connect_issue_lock_db(config)
+    if connection is None:
+        return set(keys)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        reserved: set[str] = set()
+        for key in keys:
+            cursor = connection.execute(
+                "INSERT OR IGNORE INTO phone_issue_locks (phone_key, state) VALUES (?, 'processing')",
+                (key,),
+            )
+            if cursor.rowcount:
+                reserved.add(key)
+        connection.commit()
+        return reserved
+    finally:
+        connection.close()
+
+
+def _release_phone_keys(config: Config, phones: list[str | None]) -> None:
+    keys = list(dict.fromkeys(key for phone in phones if (key := _phone_key(phone))))
+    if not keys:
+        return
+    connection = _connect_issue_lock_db(config)
+    if connection is None:
+        return
+    try:
+        placeholders = ",".join("?" for _ in keys)
+        connection.execute(
+            f"DELETE FROM phone_issue_locks WHERE state = 'processing' AND phone_key IN ({placeholders})",
+            keys,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _mark_phone_keys_issued(config: Config, phones: list[str | None]) -> None:
+    keys = list(dict.fromkeys(key for phone in phones if (key := _phone_key(phone))))
+    if not keys:
+        return
+    connection = _connect_issue_lock_db(config)
+    if connection is None:
+        return
+    try:
+        connection.executemany(
+            "UPDATE phone_issue_locks SET state = 'issued', updated_at = datetime('now') WHERE phone_key = ?",
+            [(key,) for key in keys],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def init_db(config: Config) -> None:
+    processing_phones: list[str | None] = []
     with connect(config) as connection:
         _migrate_legacy_workers_table(connection)
         connection.executescript(SCHEMA)
@@ -157,6 +240,11 @@ def init_db(config: Config) -> None:
             """
         )
         # A restart cancels in-memory code watchers, so their reservations must not persist.
+        processing_phones = [
+            row["phone"] for row in connection.execute(
+                "SELECT phone FROM accounts WHERE account_stage = 'processing'"
+            ).fetchall()
+        ]
         connection.execute(
             """
             UPDATE accounts
@@ -166,6 +254,7 @@ def init_db(config: Config) -> None:
             WHERE account_stage = 'processing'
             """
         )
+    _release_phone_keys(config, processing_phones)
 
 
 
@@ -357,22 +446,17 @@ def claim_accounts_for_worker(
         if unique_ids and allowed > 0:
             placeholders = ",".join("?" for _ in unique_ids)
             rows = connection.execute(
-                f"""
-                SELECT candidate.*
-                FROM accounts AS candidate
-                WHERE candidate.id IN ({placeholders})
-                  AND candidate.account_stage NOT IN ('issued', 'processing')
-                  AND candidate.status = 'active'
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM accounts AS reserved
-                      WHERE reserved.phone = candidate.phone
-                        AND reserved.id != candidate.id
-                        AND reserved.account_stage IN ('issued', 'processing')
-                  )
-                """,
+                f"SELECT * FROM accounts WHERE id IN ({placeholders}) "
+                "AND account_stage NOT IN ('issued', 'processing') AND status = 'active'",
                 unique_ids,
             ).fetchall()
+        busy_phone_keys = {
+            key
+            for row in connection.execute(
+                "SELECT phone FROM accounts WHERE account_stage IN ('issued', 'processing')"
+            ).fetchall()
+            if (key := _phone_key(row["phone"]))
+        }
         by_id = {int(row["id"]): row for row in rows}
         # A phone can be imported more than once under different account IDs.
         # Reserve at most one row for a phone in a request, then let the stage
@@ -384,13 +468,23 @@ def claim_accounts_for_worker(
             if not row:
                 continue
             phone = str(row["phone"] or "")
-            if phone and phone in claimed_phones:
+            phone_key = _phone_key(phone)
+            if phone_key and (phone_key in busy_phone_keys or phone_key in claimed_phones):
                 continue
             claimed_ids.append(account_id)
-            if phone:
-                claimed_phones.add(phone)
+            if phone_key:
+                claimed_phones.add(phone_key)
             if len(claimed_ids) >= allowed:
                 break
+
+        reserved_keys = _reserve_phone_keys(
+            config, [by_id[account_id]["phone"] for account_id in claimed_ids]
+        )
+        claimed_ids = [
+            account_id for account_id in claimed_ids
+            if not _phone_key(by_id[account_id]["phone"])
+            or _phone_key(by_id[account_id]["phone"]) in reserved_keys
+        ]
 
         request_id: int | None = None
         if worker_id is not None:
@@ -678,7 +772,10 @@ def set_account_stage(
     else:
         stored_services = None
         first_service = None
+    phone: str | None = None
     with connect(config) as connection:
+        row = connection.execute("SELECT phone FROM accounts WHERE id = ?", (account_id,)).fetchone()
+        phone = row["phone"] if row else None
         connection.execute(
             """
             UPDATE accounts
@@ -690,6 +787,10 @@ def set_account_stage(
             """,
             (account_stage, first_service, stored_services, account_id),
         )
+    if account_stage == "issued":
+        _mark_phone_keys_issued(config, [phone])
+    elif account_stage == "nereg":
+        _release_phone_keys(config, [phone])
 
 
 def update_account_status(config: Config, account_id: int, status: str) -> None:
@@ -701,8 +802,17 @@ def update_account_status(config: Config, account_id: int, status: str) -> None:
 
 
 def delete_account_row(config: Config, account_id: int) -> None:
+    phone: str | None = None
+    stage: str | None = None
     with connect(config) as connection:
+        row = connection.execute(
+            "SELECT phone, account_stage FROM accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        if row:
+            phone, stage = row["phone"], row["account_stage"]
         connection.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
+    if stage == "processing":
+        _release_phone_keys(config, [phone])
 
 
 def delete_accounts_by_stage(

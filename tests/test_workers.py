@@ -1,10 +1,14 @@
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from tglol.config import Config
-from tglol.db import add_account, claim_accounts_for_worker, get_account, init_db, list_accounts_by_scope
+from tglol.db import (
+    add_account, claim_accounts_for_worker, get_account, init_db,
+    list_accounts_by_scope, set_account_stage,
+)
 
 
 class AccountClaimTests(unittest.TestCase):
@@ -32,9 +36,10 @@ class AccountClaimTests(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def add_account(self, phone: str, *, status: str = "active") -> int:
+    def add_account(self, phone: str, *, status: str = "active", config: Config | None = None) -> int:
+        config = config or self.config
         return add_account(
-            self.config,
+            config,
             {
                 "phone": phone,
                 "telegram_user_id": None,
@@ -126,6 +131,33 @@ class AccountClaimTests(unittest.TestCase):
         self.assertEqual(second_claim, [])
         self.assertEqual(get_account(self.config, first_id).account_stage, "processing")
         self.assertEqual(get_account(self.config, duplicate_id).account_stage, "nereg")
+
+    def test_shared_phone_lock_blocks_other_bot_database_until_release(self):
+        lock_db = self.tmpdir / "shared" / "phone_locks.sqlite3"
+        object.__setattr__(self.config, "issuance_lock_db_path", lock_db)
+        other_config = replace(
+            self.config,
+            db_path=self.tmpdir / "other.sqlite3",
+            issuance_lock_db_path=lock_db,
+        )
+        init_db(other_config)
+        first_id = self.add_account("+79522292757")
+        second_id = self.add_account("79522292757", config=other_config)
+
+        first_claim = claim_accounts_for_worker(
+            self.config, [first_id], worker_id=None, reserve_stage="processing"
+        )
+        blocked_claim = claim_accounts_for_worker(
+            other_config, [second_id], worker_id=None, reserve_stage="processing"
+        )
+        set_account_stage(self.config, first_id, "nereg")
+        released_claim = claim_accounts_for_worker(
+            other_config, [second_id], worker_id=None, reserve_stage="processing"
+        )
+
+        self.assertEqual([account.id for account in first_claim], [first_id])
+        self.assertEqual(blocked_claim, [])
+        self.assertEqual([account.id for account in released_claim], [second_id])
 
 if __name__ == "__main__":
     unittest.main()

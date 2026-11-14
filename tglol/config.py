@@ -27,6 +27,7 @@ class Config:
     trigger_max_accounts: int = 15
     code_watch_minutes: int = 10
     workers_enabled: bool = True
+    issuance_lock_db_path: Path | None = None
 
 
 def _get_required(name: str) -> str:
@@ -149,4 +150,7 @@ def load_config() -> Config:
         trigger_max_accounts=_get_bounded_int("TRIGGER_MAX_ACCOUNTS", 15, minimum=1, maximum=100),
         code_watch_minutes=_get_bounded_int("CODE_WATCH_MINUTES", 10, minimum=1, maximum=60),
         workers_enabled=_get_bool("WORKERS_ENABLED", True),
+        issuance_lock_db_path=(
+            Path(value) if (value := os.getenv("ISSUANCE_LOCK_DB_PATH", "").strip()) else None
+        ),
     )
