@@ -159,5 +159,32 @@ class AccountClaimTests(unittest.TestCase):
         self.assertEqual(blocked_claim, [])
         self.assertEqual([account.id for account in released_claim], [second_id])
 
+    def test_startup_seeds_existing_issued_phone_into_shared_lock(self):
+        lock_db = self.tmpdir / "shared" / "phone_locks.sqlite3"
+        first_config = replace(self.config, issuance_lock_db_path=lock_db)
+        second_config = replace(
+            self.config,
+            db_path=self.tmpdir / "other-issued.sqlite3",
+            issuance_lock_db_path=lock_db,
+        )
+        init_db(first_config)
+        init_db(second_config)
+        issued_id = self.add_account("+79522292757", config=first_config)
+        clean_id = self.add_account("79522292757", config=second_config)
+        set_account_stage(first_config, issued_id, "issued")
+
+        # Simulate the lock DB being newly introduced after the historical
+        # issued account already existed.
+        lock_db.unlink()
+        init_db(first_config)
+        init_db(second_config)
+
+        self.assertEqual(
+            claim_accounts_for_worker(
+                second_config, [clean_id], worker_id=None, reserve_stage="processing"
+            ),
+            [],
+        )
+
 if __name__ == "__main__":
     unittest.main()

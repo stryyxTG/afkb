@@ -214,6 +214,10 @@ def _mark_phone_keys_issued(config: Config, phones: list[str | None]) -> None:
         return
     try:
         connection.executemany(
+            "INSERT OR IGNORE INTO phone_issue_locks (phone_key, state) VALUES (?, 'issued')",
+            [(key,) for key in keys],
+        )
+        connection.executemany(
             "UPDATE phone_issue_locks SET state = 'issued', updated_at = datetime('now') WHERE phone_key = ?",
             [(key,) for key in keys],
         )
@@ -224,6 +228,7 @@ def _mark_phone_keys_issued(config: Config, phones: list[str | None]) -> None:
 
 def init_db(config: Config) -> None:
     processing_phones: list[str | None] = []
+    issued_phones: list[str | None] = []
     with connect(config) as connection:
         _migrate_legacy_workers_table(connection)
         connection.executescript(SCHEMA)
@@ -245,6 +250,11 @@ def init_db(config: Config) -> None:
                 "SELECT phone FROM accounts WHERE account_stage = 'processing'"
             ).fetchall()
         ]
+        issued_phones = [
+            row["phone"] for row in connection.execute(
+                "SELECT phone FROM accounts WHERE account_stage = 'issued'"
+            ).fetchall()
+        ]
         connection.execute(
             """
             UPDATE accounts
@@ -255,6 +265,10 @@ def init_db(config: Config) -> None:
             """
         )
     _release_phone_keys(config, processing_phones)
+    # The shared lock DB may have been created after existing accounts were
+    # already issued. Seed those historical reservations so a duplicate copy
+    # in the other bot's separate database cannot be handed out as clean.
+    _mark_phone_keys_issued(config, issued_phones)
 
 
 
