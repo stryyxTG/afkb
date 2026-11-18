@@ -83,7 +83,12 @@ async def import_session_account(
     uploaded_json = load_json(json_path)
     api_id, api_hash = pick_api(uploaded_json, config)
     runtime = runtime_from_json(uploaded_json)
-    if not runtime.get("proxy") and config.telegram_proxy:
+    # Uploaded JSON files may contain a stale/expired per-account proxy.  The
+    # bot's configured proxy is authoritative for imports; never let a JSON
+    # proxy silently override it.
+    runtime.pop("proxy", None)
+    runtime.pop("proxy_source", None)
+    if config.telegram_proxy:
         runtime["proxy"] = config.telegram_proxy
         runtime["proxy_source"] = "global"
     parsed_twofa = pick_twofa(uploaded_json)

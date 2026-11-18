@@ -90,6 +90,30 @@ class ImporterJsonRequirementTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.account_count(), 0)
 
+    async def test_import_uses_bot_proxy_instead_of_json_proxy(self):
+        object.__setattr__(self.config, "telegram_proxy", "http://bot-proxy:8080:user:pass")
+        session_path = self.tmpdir / "account.session"
+        json_path = self.tmpdir / "account.json"
+        session_path.write_bytes(b"dummy")
+        json_path.write_text(
+            '{"phone":"+15550001111","user_id":12345,'
+            '"proxy":[2,"stale-proxy",443,true,"old","password"]}',
+            encoding="utf-8",
+        )
+
+        with patch("tglol.importer.inspect_session", return_value=("active", None, None)) as inspect_mock:
+            await import_session_account(
+                self.config,
+                session_path=session_path,
+                source_type="test",
+                created_by=1,
+                json_path=json_path,
+            )
+
+        runtime = inspect_mock.call_args.args[3]
+        self.assertEqual(runtime.get("proxy"), self.config.telegram_proxy)
+        self.assertEqual(runtime.get("proxy_source"), "global")
+
     async def test_import_session_rejects_inactive_status(self):
         session_path = self.tmpdir / "account.session"
         json_path = self.tmpdir / "account.json"
