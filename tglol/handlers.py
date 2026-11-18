@@ -404,7 +404,11 @@ def _account_connection_params(account, config: Config) -> tuple[int, str, dict[
     data = load_json(path)
     api_id, api_hash = pick_api(data, config)
     runtime = runtime_from_json(data)
-    if not runtime.get("proxy") and config.telegram_proxy:
+    # Account JSON may carry an expired exporter proxy.  Runtime connections
+    # must use the proxy configured in the bot, consistently with imports.
+    runtime.pop("proxy", None)
+    runtime.pop("proxy_source", None)
+    if config.telegram_proxy:
         runtime["proxy"] = config.telegram_proxy
         runtime["proxy_source"] = "global"
     return api_id, api_hash, runtime
