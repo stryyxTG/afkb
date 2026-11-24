@@ -4,11 +4,11 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from tglol.config import Config
 from tglol.db import init_db
-from tglol.importer import SessionValidationError, import_session_account, import_zip
+from tglol.importer import SessionValidationError, download_document, import_session_account, import_zip
 
 
 class ImporterJsonRequirementTests(unittest.IsolatedAsyncioTestCase):
@@ -55,6 +55,24 @@ class ImporterJsonRequirementTests(unittest.IsolatedAsyncioTestCase):
                 created_by=1,
                 json_path=None,
             )
+
+    async def test_document_download_retries_temporary_telegram_error(self):
+        from aiogram.exceptions import TelegramNetworkError
+
+        document = type("Document", (), {"file_id": "file-id"})()
+        remote_file = type("RemoteFile", (), {"file_path": "documents/file.zip"})()
+        bot = type("Bot", (), {})()
+        bot.get_file = AsyncMock(
+            side_effect=[TelegramNetworkError(method="getFile", message="timeout"), remote_file]
+        )
+        bot.download_file = AsyncMock()
+
+        destination = self.tmpdir / "incoming.zip"
+        result = await download_document(bot, document, destination)
+
+        self.assertEqual(result, destination)
+        self.assertEqual(bot.get_file.await_count, 2)
+        bot.download_file.assert_awaited_once()
 
     async def test_zip_session_without_json_is_rejected_before_copy(self):
         zip_path = self.tmpdir / "accounts.zip"

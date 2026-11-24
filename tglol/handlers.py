@@ -14,6 +14,7 @@ from typing import Any
 import zipfile
 
 from aiogram import BaseMiddleware, Bot, F, Router
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message, TelegramObject
@@ -40,7 +41,7 @@ from tglol.db import (
     update_account_status,
 )
 from tglol.desktop_profile import generated_account_json, random_desktop_runtime, utc_now_iso
-from tglol.importer import download_document, import_zip
+from tglol.importer import BOT_FILE_TIMEOUT, BOT_FILE_TRANSFER_ATTEMPTS, download_document, import_zip
 from tglol.json_utils import load_json, pick_api, pick_twofa, runtime_from_json, write_json
 from tglol.keyboards import (
     ACCOUNTS_PER_PAGE,
@@ -91,6 +92,33 @@ SCAN_CONCURRENCY = 5
 SCAN_ACCOUNT_TIMEOUT = 35
 BULK_CODE_LOGIN_LIMIT = 5
 _active_retry_code_tasks: set[tuple[int, int, int]] = set()
+
+
+async def _send_file_with_retry(
+    bot: Bot,
+    *,
+    chat_id: int,
+    path: Path,
+    caption: str | None = None,
+) -> None:
+    last_error: Exception | None = None
+    for attempt in range(1, BOT_FILE_TRANSFER_ATTEMPTS + 1):
+        try:
+            await bot.send_document(
+                chat_id=chat_id,
+                document=FSInputFile(path),
+                caption=caption,
+                request_timeout=BOT_FILE_TIMEOUT,
+            )
+            return
+        except (TelegramNetworkError, asyncio.TimeoutError) as exc:
+            last_error = exc
+            if attempt == BOT_FILE_TRANSFER_ATTEMPTS:
+                break
+            await asyncio.sleep(attempt)
+    raise RuntimeError(
+        f"Telegram file upload failed after {BOT_FILE_TRANSFER_ATTEMPTS} attempts: {last_error}"
+    ) from last_error
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -2040,7 +2068,12 @@ async def add_zip_file(message: Message, bot: Bot, state: FSMContext, config: Co
         return
 
     zip_path = unique_path(config.temp_dir, filename)
-    await download_document(bot, message.document, zip_path)
+    try:
+        await download_document(bot, message.document, zip_path)
+    except Exception as exc:
+        logger.exception("ZIP download failed")
+        await message.answer(f"Не удалось скачать ZIP из Telegram: {exc}")
+        return
     progress_message = await message.answer("ZIP получен. Начинаю импорт...")
     last_progress_update = 0.0
 
@@ -2374,7 +2407,7 @@ async def show_account_detail_message(message: Message, config: Config) -> None:
 
 
 @router.callback_query(F.data.startswith("accounts:file:"))
-async def download_account_file(callback: CallbackQuery, config: Config) -> None:
+async def download_account_file(callback: CallbackQuery, config: Config, bot: Bot) -> None:
     _, _, file_type, raw_id = callback.data.split(":", 3)
     account = get_account(config, int(raw_id))
     if not account:
@@ -2386,12 +2419,17 @@ async def download_account_file(callback: CallbackQuery, config: Config) -> None
         await callback.answer("Файл не найден.", show_alert=True)
         return
 
-    await callback.message.answer_document(FSInputFile(path))
+    try:
+        await _send_file_with_retry(bot, chat_id=callback.message.chat.id, path=path)
+    except Exception as exc:
+        logger.exception("Account file upload failed")
+        await callback.answer(f"Не удалось отправить файл: {exc}", show_alert=True)
+        return
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("accounts:zip_common:"))
-async def download_common_stage_zip(callback: CallbackQuery, config: Config) -> None:
+async def download_common_stage_zip(callback: CallbackQuery, config: Config, bot: Bot) -> None:
     parts = callback.data.split(":")
     stage = parts[2] if len(parts) > 2 else ""
     raw_filter = parts[3] if len(parts) > 3 else "all"
@@ -2415,14 +2453,25 @@ async def download_common_stage_zip(callback: CallbackQuery, config: Config) -> 
             pass
         await callback.answer("Файлы для архива не найдены.", show_alert=True)
         return
-    await callback.message.answer_document(
-        FSInputFile(zip_path),
-        caption=f"Хранилище {_stage_filter_title(stage, registration_service, excluded_service)}: {len(accounts)} аккаунтов, {files_count} файлов.",
-    )
     try:
-        zip_path.unlink(missing_ok=True)
-    except OSError:
-        pass
+        await _send_file_with_retry(
+            bot,
+            chat_id=callback.message.chat.id,
+            path=zip_path,
+            caption=(
+                f"Хранилище {_stage_filter_title(stage, registration_service, excluded_service)}: "
+                f"{len(accounts)} аккаунтов, {files_count} файлов."
+            ),
+        )
+    except Exception as exc:
+        logger.exception("Storage ZIP upload failed")
+        await callback.answer(f"Не удалось отправить ZIP: {exc}", show_alert=True)
+        return
+    finally:
+        try:
+            zip_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     await callback.answer("ZIP сформирован.")
 
 

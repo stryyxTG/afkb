@@ -8,6 +8,7 @@ import shutil
 import zipfile
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramNetworkError
 from aiogram.types import Document
 
 from tglol.config import Config
@@ -19,6 +20,8 @@ from tglol.telegram_service import inspect_session, user_fields
 
 
 SESSION_IMPORT_TIMEOUT = 35
+BOT_FILE_TIMEOUT = 180
+BOT_FILE_TRANSFER_ATTEMPTS = 3
 ZipProgress = Callable[[int, int, str], Awaitable[None]]
 TRANSIENT_IMPORT_ERROR_MARKERS = (
     "timeout",
@@ -64,8 +67,29 @@ class PendingRetry:
 
 async def download_document(bot: Bot, document: Document, destination: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    await bot.download(document, destination=destination)
-    return destination
+    last_error: Exception | None = None
+    for attempt in range(1, BOT_FILE_TRANSFER_ATTEMPTS + 1):
+        try:
+            # Bot.download() uses its default request timeout for getFile.
+            # Request metadata separately so both steps use the file timeout.
+            remote_file = await bot.get_file(
+                document.file_id,
+                request_timeout=BOT_FILE_TIMEOUT,
+            )
+            await bot.download_file(
+                remote_file.file_path,
+                destination=destination,
+                timeout=BOT_FILE_TIMEOUT,
+            )
+            return destination
+        except (TelegramNetworkError, asyncio.TimeoutError) as exc:
+            last_error = exc
+            if attempt == BOT_FILE_TRANSFER_ATTEMPTS:
+                break
+            await asyncio.sleep(attempt)
+    raise RuntimeError(
+        f"Telegram file download failed after {BOT_FILE_TRANSFER_ATTEMPTS} attempts: {last_error}"
+    ) from last_error
 
 
 async def import_session_account(
